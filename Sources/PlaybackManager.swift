@@ -62,11 +62,29 @@ enum RepeatMode: CaseIterable { case off, all, one }
         if shuffle { queue = [cur] + original.filter { $0 != cur }.shuffled(); index = 0 }
         else { queue = original; index = original.firstIndex(of: cur) ?? 0 }
     }
+    @Published var isResolving = false
+    @Published var streamError: String?
+    private var loadTask: Task<Void, Never>?
     private func load() {
-        guard let t = current, let url = t.url else { return }
+        loadTask?.cancel()
+        guard let t = current else { return }
+        streamError = nil; duration = t.duration; position = 0
+        if let url = t.url { isResolving = false; startItem(url); return }
+        guard let id = t.ytID else { return }
+        isResolving = true; player.pause(); isPlaying = false
+        // keep the app alive in background/screen-off while the next stream URL is being resolved
+        let bg = UIApplication.shared.beginBackgroundTask(withName: "auralis.resolve", expirationHandler: nil)
+        loadTask = Task { [weak self] in
+            defer { UIApplication.shared.endBackgroundTask(bg) }
+            let url = try? await YouTubeSource.shared.streamURL(id)
+            guard let self, !Task.isCancelled, self.current?.id == t.id else { return }
+            self.isResolving = false
+            if let url { self.startItem(url) } else { self.streamError = "Couldn't load this track. Try another one." }
+        }
+    }
+    private func startItem(_ url: URL) {
         try? AVAudioSession.sharedInstance().setActive(true)
         player.replaceCurrentItem(with: AVPlayerItem(url: url))
-        duration = t.duration; position = 0
         play()
     }
     func play() { player.play(); isPlaying = true; updateNowPlaying() }
@@ -107,12 +125,18 @@ enum RepeatMode: CaseIterable { case off, all, one }
             return .success
         }
     }
+    private var artCache: [UInt64: UIImage] = [:]
     private func updateNowPlaying() {
         guard let t = current else { return }
         var info: [String: Any] = [MPMediaItemPropertyTitle: t.title, MPMediaItemPropertyArtist: t.artist,
-            MPMediaItemPropertyAlbumTitle: t.album, MPMediaItemPropertyPlaybackDuration: t.duration,
+            MPMediaItemPropertyAlbumTitle: t.album, MPMediaItemPropertyPlaybackDuration: duration > 0 ? duration : t.duration,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: position, MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0]
-        if let img = t.artwork { info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: img.size) { _ in img } }
+        if let img = t.artwork ?? artCache[t.id] { info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: img.size) { _ in img } }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        if t.artwork == nil, artCache[t.id] == nil, let u = t.artworkURL {
+            Task { [weak self] in
+                if let (d, _) = try? await URLSession.shared.data(from: u), let img = UIImage(data: d) { self?.artCache[t.id] = img; self?.updateNowPlaying() }
+            }
+        }
     }
 }

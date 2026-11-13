@@ -9,6 +9,7 @@ struct Track: Identifiable, Hashable {
     let item: MPMediaItem?
     var artworkData: Data? = nil
     var artworkURL: URL? = nil
+    var ytID: String? = nil   // YouTube video id; stream URL is resolved lazily at play time
     var artwork: UIImage? { item?.artwork?.image(at: CGSize(width: 600, height: 600)) ?? artworkData.flatMap(UIImage.init(data:)) }
     static func == (a: Track, b: Track) -> Bool { a.id == b.id }
     func hash(into h: inout Hasher) { h.combine(id) }

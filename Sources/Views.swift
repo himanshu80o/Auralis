@@ -82,14 +82,37 @@ struct VideosView: View {
 
 struct MiniPlayer: View {
     @EnvironmentObject var p: PlaybackManager
+    @AppStorage("theme") private var theme = 0
+    @Environment(\.colorScheme) private var scheme
     var body: some View {
-        HStack {
-            ArtView(track: p.current).frame(width: 40, height: 40).clipShape(RoundedRectangle(cornerRadius: 6))
-            VStack(alignment: .leading) { Text(p.current?.title ?? "").lineLimit(1); Text(p.current?.artist ?? "").font(.caption).foregroundStyle(.secondary) }
-            Spacer()
-            Button { p.toggle() } label: { Image(systemName: p.isPlaying ? "pause.fill" : "play.fill") }
-            Button { p.next() } label: { Image(systemName: "forward.fill") }.padding(.leading, 8)
-        }.padding(10).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14)).padding(.horizontal, 8)
+        let pal = Palette.make(theme, scheme)
+        let frac = p.duration > 0 ? min(max(p.position / p.duration, 0), 1) : 0
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                ArtView(track: p.current).frame(width: 48, height: 48).clipShape(RoundedRectangle(cornerRadius: 10))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(p.current?.title ?? "").font(.system(size: 16, weight: .semibold)).lineLimit(1)
+                    Text(p.current?.artist ?? "").font(.system(size: 13)).foregroundStyle(pal.sub).lineLimit(1)
+                }
+                Spacer()
+                Button { p.previous() } label: { Image(systemName: "backward.fill") }
+                Button { p.toggle() } label: {
+                    Group { if p.isResolving { ProgressView().tint(pal.accent) } else { Image(systemName: p.isPlaying ? "pause.fill" : "play.fill") } }
+                        .frame(width: 40, height: 40).overlay(Circle().stroke(pal.accent, lineWidth: 2))
+                }
+                Button { p.next() } label: { Image(systemName: "forward.fill") }
+            }.padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 8)
+            GeometryReader { g in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(pal.sub.opacity(0.25))
+                    Capsule().fill(pal.gradient).frame(width: g.size.width * CGFloat(frac))
+                }
+            }.frame(height: 3).padding(.horizontal, 14).padding(.bottom, 8)
+        }
+        .foregroundStyle(pal.text)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
+        .overlay(RoundedRectangle(cornerRadius: 22).stroke(pal.accent.opacity(0.6), lineWidth: 1))
+        .padding(.horizontal, 8)
     }
 }
 
@@ -159,7 +182,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Picker("Theme", selection: $theme) { Text("System").tag(0); Text("Light").tag(1); Text("Dark").tag(2) }
+                Picker("Theme", selection: $theme) { Text("Dark").tag(2); Text("Light").tag(1); Text("System").tag(0); Text("Neon Purple").tag(3); Text("Neon Blue").tag(4) }
                 Section("Folders (Files app)") {
                     Button("Add folder…") { picking = true }
                     ForEach(folders.folderNames, id: \.self) { Label($0, systemImage: "folder") }

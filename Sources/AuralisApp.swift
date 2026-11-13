@@ -13,8 +13,8 @@ import SwiftUI
                 if onboarded { RootView() } else { WelcomeView(onboarded: $onboarded) }
             }
             .environmentObject(player).environmentObject(library).environmentObject(videos).environmentObject(folders)
-            .tint(Color(red: 0.1, green: 0.8, blue: 0.85))
-            .preferredColorScheme(theme == 1 ? .light : theme == 2 ? .dark : nil)
+            .tint(theme == 3 ? Palette.purple.accent : theme == 4 ? Palette.blue.accent : Color(red: 0.1, green: 0.8, blue: 0.85))
+            .preferredColorScheme(theme == 1 ? .light : theme == 0 ? nil : .dark)
         }
     }
 }
@@ -46,7 +46,7 @@ struct RootView: View {
         TabView {
             SongsView().tabItem { Label("Music", systemImage: "music.note") }
             VideosView().tabItem { Label("Videos", systemImage: "play.rectangle") }
-            OnlineView().tabItem { Label("Online", systemImage: "globe") }
+            OnlineView().tabItem { Label("Online", systemImage: "icloud") }
             SettingsView().tabItem { Label("Settings", systemImage: "gearshape") }
         }
         .safeAreaInset(edge: .bottom, spacing: 49) {
