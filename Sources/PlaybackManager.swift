@@ -13,17 +13,21 @@ enum RepeatMode: CaseIterable { case off, all, one }
     @Published var duration = 0.0
     @Published var repeatMode = RepeatMode.off
     @Published var shuffle = false { didSet { applyShuffle() } }
+    @Published var sleepEnd: Date?
+    var scrubbing = false
+    private var sleepTask: Task<Void, Never>?
     private var original: [Track] = []
     private let player = AVPlayer()
     var current: Track? { queue.indices.contains(index) ? queue[index] : nil }
 
     private init() {
         configureSession(); setupRemote()
-        player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { [weak self] t in
+        player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { [weak self] t in
             Task { @MainActor in
                 guard let s = self else { return }
+                if s.scrubbing { return }
                 s.position = t.seconds.isFinite ? t.seconds : 0
-                s.updateNowPlaying()
+                if let d = s.player.currentItem?.duration.seconds, d.isFinite, d > 0, abs(d - s.duration) > 0.5 { s.duration = d }
             }
         }
         let nc = NotificationCenter.default
@@ -41,6 +45,7 @@ enum RepeatMode: CaseIterable { case off, all, one }
 
     private func configureSession() {
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+        try? AVAudioSession.sharedInstance().setActive(true)
     }
     private func interruption(_ type: UInt?, _ opt: UInt?) {
         if type == AVAudioSession.InterruptionType.began.rawValue { isPlaying = false }
@@ -66,8 +71,16 @@ enum RepeatMode: CaseIterable { case off, all, one }
     }
     func play() { player.play(); isPlaying = true; updateNowPlaying() }
     func pause() { player.pause(); isPlaying = false; updateNowPlaying() }
+    func startSleep(minutes: Int) {
+        sleepTask?.cancel(); sleepEnd = Date().addingTimeInterval(Double(minutes) * 60)
+        sleepTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(minutes * 60))
+            if !Task.isCancelled { self?.pause(); self?.sleepEnd = nil }
+        }
+    }
+    func cancelSleep() { sleepTask?.cancel(); sleepEnd = nil }
     func toggle() { isPlaying ? pause() : play() }
-    func seek(_ s: Double) { player.seek(to: CMTime(seconds: s, preferredTimescale: 600)); position = s }
+    func seek(_ s: Double) { player.seek(to: CMTime(seconds: s, preferredTimescale: 600)); position = s; updateNowPlaying() }
     func next() {
         guard !queue.isEmpty else { return }
         if index + 1 < queue.count { index += 1 } else if repeatMode == .all { index = 0 } else { pause(); return }

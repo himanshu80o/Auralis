@@ -44,6 +44,11 @@ import SwiftUI
         tracks = found.filter { seen.insert($0.id).inserted }.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
 
+    func delete(_ t: Track) {
+        guard let u = t.url, u.isFileURL else { return }
+        try? FileManager.default.removeItem(at: u)
+        tracks.removeAll { $0.id == t.id }
+    }
     nonisolated static func audioFiles(in dir: URL) -> [URL] {
         guard let e = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return [] }
         return e.compactMap { $0 as? URL }.filter { exts.contains($0.pathExtension.lowercased()) }

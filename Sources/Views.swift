@@ -1,14 +1,26 @@
 import SwiftUI
+import Photos
 
 func fmt(_ s: Double) -> String { let t = Int(max(0, s)); return String(format: "%d:%02d", t / 60, t % 60) }
+
+struct ArtView: View {
+    let track: Track?
+    var body: some View {
+        if let a = track?.artwork { Image(uiImage: a).resizable().scaledToFill() }
+        else if let u = track?.artworkURL { AsyncImage(url: u) { $0.resizable().scaledToFill() } placeholder: { Color.gray.opacity(0.3) } }
+        else { Color.gray.opacity(0.3) }
+    }
+}
 
 struct SongsView: View {
     @EnvironmentObject var lib: MusicLibrary
     @EnvironmentObject var folders: FolderLibrary
     @EnvironmentObject var player: PlaybackManager
     @State private var query = ""
+    @State private var toDelete: Track?
     var all: [Track] { lib.songs + folders.tracks }
     var shown: [Track] { query.isEmpty ? all : all.filter { ($0.title + $0.artist + $0.album).localizedCaseInsensitiveContains(query) } }
+    func canDelete(_ t: Track) -> Bool { t.item == nil && t.url?.isFileURL == true }
     var body: some View {
         NavigationStack {
             Group {
@@ -20,32 +32,50 @@ struct SongsView: View {
                     List(Array(shown.enumerated()), id: \.element.id) { i, t in
                         Button { player.start(shown, at: i) } label: {
                             HStack {
-                                Group { if let a = t.artwork { Image(uiImage: a).resizable() } else { Color.gray.opacity(0.3) } }
-                                    .frame(width: 48, height: 48).clipShape(RoundedRectangle(cornerRadius: 8))
+                                ArtView(track: t).frame(width: 48, height: 48).clipShape(RoundedRectangle(cornerRadius: 8))
                                 VStack(alignment: .leading) { Text(t.title).lineLimit(1); Text(t.artist).font(.caption).foregroundStyle(.secondary) }
                             }
                         }.foregroundStyle(.primary)
+                        .swipeActions { if canDelete(t) { Button("Delete", role: .destructive) { toDelete = t } } }
+                        .contextMenu { if canDelete(t) { Button("Delete file", role: .destructive) { toDelete = t } } }
                     }.listStyle(.plain)
                 }
             }.navigationTitle("Music").searchable(text: $query)
+            .confirmationDialog("Delete this file from your device?", isPresented: Binding(get: { toDelete != nil }, set: { if !$0 { toDelete = nil } }), titleVisibility: .visible) {
+                Button("Delete", role: .destructive) { if let t = toDelete { folders.delete(t) }; toDelete = nil }
+            }
         }
     }
 }
 
 struct VideosView: View {
     @EnvironmentObject var vids: VideoLibrary
+    @EnvironmentObject var player: PlaybackManager
+    @State private var playing: VideoItem?
     var body: some View {
         NavigationStack {
             ScrollView {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 10)], spacing: 10) {
                     ForEach(vids.videos) { v in
-                        NavigationLink { VideoPlayerScreen(asset: v.asset).ignoresSafeArea() } label: {
+                        Button { playing = v } label: {
                             Thumb(asset: v.asset).frame(height: 100).clipShape(RoundedRectangle(cornerRadius: 12))
                                 .overlay(alignment: .bottomTrailing) { Text(fmt(v.duration)).font(.caption2).padding(4).background(.black.opacity(0.6), in: Capsule()).padding(6) }
+                        }
+                        .contextMenu {
+                            Button("Delete video", role: .destructive) {
+                                Task { try? await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.deleteAssets([v.asset] as NSArray) }; vids.load() }
+                            }
                         }
                     }
                 }.padding()
             }.navigationTitle("Videos")
+            .fullScreenCover(item: $playing) { v in
+                ZStack(alignment: .topLeading) {
+                    Color.black.ignoresSafeArea()
+                    VideoPlayerScreen(asset: v.asset)
+                    Button { playing = nil } label: { Image(systemName: "xmark.circle.fill").font(.largeTitle).padding() }.tint(.white)
+                }.onAppear { player.pause() }
+            }
         }
     }
 }
@@ -54,7 +84,7 @@ struct MiniPlayer: View {
     @EnvironmentObject var p: PlaybackManager
     var body: some View {
         HStack {
-            if let a = p.current?.artwork { Image(uiImage: a).resizable().frame(width: 40, height: 40).clipShape(RoundedRectangle(cornerRadius: 6)) }
+            ArtView(track: p.current).frame(width: 40, height: 40).clipShape(RoundedRectangle(cornerRadius: 6))
             VStack(alignment: .leading) { Text(p.current?.title ?? "").lineLimit(1); Text(p.current?.artist ?? "").font(.caption).foregroundStyle(.secondary) }
             Spacer()
             Button { p.toggle() } label: { Image(systemName: p.isPlaying ? "pause.fill" : "play.fill") }
@@ -63,26 +93,60 @@ struct MiniPlayer: View {
     }
 }
 
+struct VinylView: View {
+    let track: Track?; let spinning: Bool
+    @State private var angle = 0.0
+    private let timer = Timer.publish(every: 1.0 / 30, on: .main, in: .common).autoconnect()
+    var body: some View {
+        GeometryReader { g in
+            let s = min(g.size.width, g.size.height)
+            ZStack {
+                Circle().fill(.black)
+                ForEach(1..<8) { i in Circle().stroke(.white.opacity(0.07), lineWidth: 1).frame(width: s * (1 - CGFloat(i) * 0.07)) }
+                ArtView(track: track).frame(width: s * 0.4, height: s * 0.4).clipShape(Circle())
+                Circle().fill(.black).frame(width: s * 0.04)
+            }.frame(width: s, height: s).rotationEffect(.degrees(angle)).shadow(radius: 14, y: 8)
+        }.aspectRatio(1, contentMode: .fit)
+        .onReceive(timer) { _ in if spinning { angle += 1.2 } }
+    }
+}
+
 struct FullPlayer: View {
     @EnvironmentObject var p: PlaybackManager
     @State private var scrub: Double?
     var body: some View {
-        VStack(spacing: 20) {
-            if let a = p.current?.artwork { Image(uiImage: a).resizable().scaledToFit().clipShape(RoundedRectangle(cornerRadius: 24)).shadow(radius: 20).scaleEffect(p.isPlaying ? 1 : 0.88).animation(.spring, value: p.isPlaying) }
-            else { RoundedRectangle(cornerRadius: 24).fill(.gray.opacity(0.3)).aspectRatio(1, contentMode: .fit) }
-            VStack { Text(p.current?.title ?? "").font(.title2.bold()); Text(p.current?.artist ?? "").foregroundStyle(.secondary) }
-            Slider(value: Binding(get: { scrub ?? p.position }, set: { scrub = $0 }), in: 0...max(p.duration, 1)) { editing in
-                if !editing, let s = scrub { p.seek(s); scrub = nil }
-            }
-            HStack { Text(fmt(scrub ?? p.position)); Spacer(); Text("-" + fmt(p.duration - p.position)) }.font(.caption).monospacedDigit()
-            HStack(spacing: 32) {
-                Button { p.shuffle.toggle() } label: { Image(systemName: "shuffle").foregroundStyle(p.shuffle ? Color.accentColor : .secondary) }
-                Button { p.previous() } label: { Image(systemName: "backward.fill").font(.title) }
-                Button { p.toggle() } label: { Image(systemName: p.isPlaying ? "pause.circle.fill" : "play.circle.fill").font(.system(size: 64)) }
-                Button { p.next() } label: { Image(systemName: "forward.fill").font(.title) }
-                Button { p.cycleRepeat() } label: { Image(systemName: p.repeatMode == .one ? "repeat.1" : "repeat").foregroundStyle(p.repeatMode == .off ? .secondary : Color.accentColor) }
-            }.sensoryFeedback(.impact, trigger: p.isPlaying)
-        }.padding(28).presentationDragIndicator(.visible)
+        ZStack {
+            Color(red: 0.88, green: 0.87, blue: 0.85).ignoresSafeArea()
+            VStack(spacing: 16) {
+                HStack {
+                    Spacer()
+                    Menu {
+                        ForEach([5, 10, 15, 30, 45, 60], id: \.self) { m in Button("Sleep in \(m) min") { p.startSleep(minutes: m) } }
+                        Button("Cancel timer", role: .destructive) { p.cancelSleep() }
+                    } label: { Image(systemName: p.sleepEnd == nil ? "moon.zzz" : "moon.zzz.fill").font(.title3) }
+                }
+                VinylView(track: p.current, spinning: p.isPlaying).padding(.horizontal, 8)
+                VStack(spacing: 4) {
+                    Text(p.current?.title ?? "").font(.system(size: 30, weight: .bold, design: .serif)).multilineTextAlignment(.center).lineLimit(2)
+                    Text(p.current?.artist ?? "").font(.subheadline)
+                }
+                Slider(value: Binding(get: { scrub ?? p.position }, set: { scrub = $0; p.scrubbing = true }), in: 0...max(p.duration, 1)) { editing in
+                    if !editing, let s = scrub { p.seek(s); scrub = nil; p.scrubbing = false }
+                }.tint(.black)
+                HStack {
+                    Text(fmt(scrub ?? p.position)); Spacer(); Text("-" + fmt(p.duration - (scrub ?? p.position)))
+                }.font(.caption.monospacedDigit())
+                HStack(spacing: 20) {
+                    Button { p.previous() } label: { Image(systemName: "backward.fill").frame(width: 90, height: 60).background(.black.opacity(0.1), in: Capsule()) }
+                    Button { p.toggle() } label: { Image(systemName: p.isPlaying ? "pause.fill" : "play.fill").font(.title).foregroundStyle(.white).frame(width: 84, height: 84).background(.black, in: Circle()) }
+                    Button { p.next() } label: { Image(systemName: "forward.fill").frame(width: 90, height: 60).background(.black.opacity(0.1), in: Capsule()) }
+                }
+                HStack(spacing: 40) {
+                    Button { p.shuffle.toggle() } label: { Image(systemName: "shuffle").opacity(p.shuffle ? 1 : 0.35) }
+                    Button { p.cycleRepeat() } label: { Image(systemName: p.repeatMode == .one ? "repeat.1" : "repeat").opacity(p.repeatMode == .off ? 0.35 : 1) }
+                }
+            }.padding(24).foregroundStyle(.black).sensoryFeedback(.impact, trigger: p.isPlaying)
+        }.environment(\.colorScheme, .light).presentationDragIndicator(.visible)
     }
 }
 
@@ -108,7 +172,6 @@ struct SettingsView: View {
                 Section("Library") {
                     Button("Rescan music (\(lib.songs.count) songs)") { lib.load() }
                     Button("Rescan videos (\(vids.videos.count))") { vids.load() }
-                    if lib.skipped > 0 { Text("\(lib.skipped) DRM/cloud-only songs can't be played by third-party apps.").font(.footnote) }
                     Button("Open iOS Settings") { UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!) }
                 }
             }.navigationTitle("Settings")

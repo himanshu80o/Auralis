@@ -8,6 +8,7 @@ struct Track: Identifiable, Hashable {
     let url: URL?          // nil = DRM / cloud-only; not playable via AVPlayer
     let item: MPMediaItem?
     var artworkData: Data? = nil
+    var artworkURL: URL? = nil
     var artwork: UIImage? { item?.artwork?.image(at: CGSize(width: 600, height: 600)) ?? artworkData.flatMap(UIImage.init(data:)) }
     static func == (a: Track, b: Track) -> Bool { a.id == b.id }
     func hash(into h: inout Hasher) { h.combine(id) }

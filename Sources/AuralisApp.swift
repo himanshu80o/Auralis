@@ -6,6 +6,7 @@ import SwiftUI
     @StateObject private var videos = VideoLibrary()
     @StateObject private var folders = FolderLibrary()
     @AppStorage("onboarded") private var onboarded = false
+    @AppStorage("theme") private var theme = 0
     var body: some Scene {
         WindowGroup {
             Group {
@@ -13,6 +14,7 @@ import SwiftUI
             }
             .environmentObject(player).environmentObject(library).environmentObject(videos).environmentObject(folders)
             .tint(Color(red: 0.1, green: 0.8, blue: 0.85))
+            .preferredColorScheme(theme == 1 ? .light : theme == 2 ? .dark : nil)
         }
     }
 }
@@ -24,8 +26,7 @@ struct WelcomeView: View {
     var body: some View {
         VStack(spacing: 20) {
             Spacer()
-            Image(systemName: "waveform").font(.system(size: 64, weight: .bold))
-                .padding(36).background(LinearGradient(colors: [.cyan, .blue], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 36))
+            Image("Logo").resizable().frame(width: 120, height: 120).clipShape(RoundedRectangle(cornerRadius: 28))
             Text("AURALIS").font(.largeTitle.bold())
             Text("Every Sound. Every Moment.").foregroundStyle(.secondary)
             Text("Auralis needs access to your Music library and Photos videos. iOS does not allow scanning other storage; you can add Files folders later.")
@@ -45,6 +46,7 @@ struct RootView: View {
         TabView {
             SongsView().tabItem { Label("Music", systemImage: "music.note") }
             VideosView().tabItem { Label("Videos", systemImage: "play.rectangle") }
+            OnlineView().tabItem { Label("Online", systemImage: "globe") }
             SettingsView().tabItem { Label("Settings", systemImage: "gearshape") }
         }
         .safeAreaInset(edge: .bottom, spacing: 49) {

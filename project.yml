@@ -5,7 +5,7 @@ targets:
     type: application
     platform: iOS
     sources: [Sources]
-    settings: {PRODUCT_BUNDLE_IDENTIFIER: com.example.auralis, SWIFT_VERSION: "5.9", TARGETED_DEVICE_FAMILY: "1,2"}
+    settings: {PRODUCT_BUNDLE_IDENTIFIER: com.example.auralis, SWIFT_VERSION: "5.9", TARGETED_DEVICE_FAMILY: "1,2", ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon}
     info:
       path: Info.plist
       properties:
