@@ -115,11 +115,21 @@ enum RepeatMode: CaseIterable { case off, all, one }
                 self.isResolving = false
                 self.startItem(s.url, headers: s.headers, onlineID: id, source: s.source)
             } catch {
+                let why = (error as? ResolveError)?.message ?? ""
                 guard let self, !Task.isCancelled, self.current?.id == t.id else { return }
-                self.isResolving = false
-                self.streamError = "Couldn't load this track. Check your internet and try again."
+                await self.playFallback(t, reason: why)
             }
         }
+    }
+    /// Every YouTube route failed: try Audius / Apple preview, otherwise show the exact reason.
+    private func playFallback(_ t: Track, reason: String) async {
+        isResolving = true
+        let fb = await Fallback.find(title: t.title, artist: t.artist)
+        guard !Task.isCancelled, current?.id == t.id else { return }
+        isResolving = false
+        if let fb { streamError = fb.label; startItem(fb.url); return }
+        isPlaying = false; player.replaceCurrentItem(with: nil)
+        streamError = reason.isEmpty ? "Couldn't load this track. Tap play to retry." : "Couldn't load this track (\(reason.prefix(110)))"
     }
     private func startItem(_ url: URL, headers: [String: String] = [:], onlineID: String? = nil, source: String = "") {
         self.onlineID = onlineID; self.source = source
@@ -148,7 +158,9 @@ enum RepeatMode: CaseIterable { case off, all, one }
     private func itemFailed() {
         guard let t = current else { return }
         guard let id = onlineID, retries < 3 else {
-            isResolving = false; isPlaying = false; streamError = "Couldn't play this track. Try another one."; return
+            loadTask?.cancel()
+            loadTask = Task { [weak self] in await self?.playFallback(t, reason: "player failed") }
+            return
         }
         retries += 1; let src = source
         player.pause(); isResolving = true
@@ -166,7 +178,10 @@ enum RepeatMode: CaseIterable { case off, all, one }
     }
 
     // MARK: transport
-    func play() { player.play(); isPlaying = true; updateNowPlaying() }
+    func play() {
+        if streamError != nil, player.currentItem == nil, let t = current, let id = t.ytID { streamError = nil; loadOnline(t, id, fresh: true); return }   // retry after a failed load
+        player.play(); isPlaying = true; updateNowPlaying()
+    }
     func pause() { player.pause(); isPlaying = false; updateNowPlaying() }
     func toggle() { isPlaying ? pause() : play() }
     func seek(_ s: Double) {

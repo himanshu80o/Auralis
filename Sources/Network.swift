@@ -3,7 +3,9 @@ import Foundation
 // MARK: - Shared models
 struct Hit: Sendable { let id, title, artist: String; let duration: Double }
 struct Album: Identifiable, Hashable, Sendable { let id: String; let name, artist: String; let art: URL? }
-struct StreamInfo: Sendable { let url: URL; let headers: [String: String]; let bitrate: Int; let source: String }
+struct StreamInfo: Sendable { let url: URL; let headers: [String: String]; let bitrate: Int; let source: String; var muxed = false }   // muxed = video+audio mp4 (itag 18), audio is extracted when downloading
+
+struct ResolveError: LocalizedError, Sendable { let message: String; var errorDescription: String? { message } }
 struct Boxed<T: Sendable>: Sendable { let value: T; let base: String }
 
 func fnv(_ s: String) -> UInt64 {
@@ -37,17 +39,32 @@ func parseDuration(_ s: String) -> Double {
 // MARK: - YouTube InnerTube (direct data API: JSON only, no web page, no ads)
 enum IT {
     struct Client { let name, version, ua, source: String; let id: Int; let extra: [String: Any] }
-    static let androidVR = Client(name: "ANDROID_VR", version: "1.60.19",
-        ua: "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+    // Newer ANDROID_VR build (what yt-dlp uses now) plus the older one, both tried in parallel.
+    static let androidVR = Client(name: "ANDROID_VR", version: "1.65.10",
+        ua: "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
         source: "android_vr", id: 28,
+        extra: ["deviceMake": "Oculus", "deviceModel": "Quest 3", "osName": "Android", "osVersion": "12L", "androidSdkVersion": 32])
+    static let androidVROld = Client(name: "ANDROID_VR", version: "1.60.19",
+        ua: "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+        source: "android_vr_old", id: 28,
         extra: ["deviceMake": "Oculus", "deviceModel": "Quest 3", "osName": "Android", "osVersion": "12L", "androidSdkVersion": 32])
     static let ios = Client(name: "IOS", version: "20.10.4",
         ua: "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
         source: "ios", id: 5,
         extra: ["deviceMake": "Apple", "deviceModel": "iPhone16,2", "osName": "iPhone", "osVersion": "18.3.2.22D82"])
 
+    /// Cheap check that a stream URL really answers (YouTube often hands out URLs that later return 403).
+    static func probe(_ s: StreamInfo) async -> Bool {
+        var r = URLRequest(url: s.url, timeoutInterval: 8)
+        s.headers.forEach { r.setValue($1, forHTTPHeaderField: $0) }
+        r.setValue("bytes=0-1", forHTTPHeaderField: "Range")
+        guard let (bytes, resp) = try? await URLSession.shared.bytes(for: r), let h = resp as? HTTPURLResponse else { return false }
+        _ = bytes   // body is never read; leaving scope cancels the transfer
+        return h.statusCode == 200 || h.statusCode == 206
+    }
+
     static func player(_ id: String, _ c: Client) async throws -> StreamInfo {
-        var req = URLRequest(url: URL(string: "https://www.youtube.com/youtubei/v1/player?prettyPrint=false")!, timeoutInterval: 6)
+        var req = URLRequest(url: URL(string: "https://www.youtube.com/youtubei/v1/player?prettyPrint=false")!, timeoutInterval: 8)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(c.ua, forHTTPHeaderField: "User-Agent")
@@ -59,12 +76,28 @@ enum IT {
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (d, _) = try await URLSession.shared.data(for: req)
         let j = try JSONSerialization.jsonObject(with: d)
-        guard let fm = dig(j, ["streamingData", "adaptiveFormats"]) as? [[String: Any]] else { throw URLError(.resourceUnavailable) }
-        // AVPlayer only plays AAC (audio/mp4). Always take the HIGHEST bitrate available.
-        let audio = fm.filter { (($0["mimeType"] as? String) ?? "").hasPrefix("audio/mp4") && ($0["url"] as? String) != nil }
-        guard let best = audio.max(by: { ($0["bitrate"] as? Int ?? 0) < ($1["bitrate"] as? Int ?? 0) }),
-              let u = (best["url"] as? String).flatMap(URL.init(string:)) else { throw URLError(.resourceUnavailable) }
-        return StreamInfo(url: u, headers: ["User-Agent": c.ua], bitrate: best["bitrate"] as? Int ?? 0, source: c.source)
+        guard let sd = dig(j, ["streamingData"]) as? [String: Any] else {
+            let st = dig(j, ["playabilityStatus", "status"]) as? String ?? "NO_DATA"
+            let why = (dig(j, ["playabilityStatus", "reason"]) as? String ?? "").prefix(40)
+            throw ResolveError(message: "\(c.source): \(st) \(why)")
+        }
+        func mime(_ f: [String: Any]) -> String { (f["mimeType"] as? String) ?? "" }
+        func url(_ f: [String: Any]) -> URL? { (f["url"] as? String).flatMap(URL.init(string:)) }   // ciphered formats have no "url" -> skipped
+        func br(_ f: [String: Any]) -> Int { f["bitrate"] as? Int ?? 0 }
+        var cands: [StreamInfo] = []
+        // 1) audio-only AAC, best bitrate first (AVPlayer cannot play webm/opus)
+        let adaptive = sd["adaptiveFormats"] as? [[String: Any]] ?? []
+        for f in adaptive.filter({ mime($0).hasPrefix("audio/mp4") && url($0) != nil }).sorted(by: { br($0) > br($1) }) {
+            cands.append(StreamInfo(url: url(f)!, headers: ["User-Agent": c.ua], bitrate: br(f), source: c.source))
+        }
+        // 2) muxed mp4 (itag 18, 360p + AAC). YouTube still serves this one without a PO token.
+        let muxed = sd["formats"] as? [[String: Any]] ?? []
+        for f in muxed.filter({ mime($0).hasPrefix("video/mp4") && mime($0).contains("mp4a") && url($0) != nil }).sorted(by: { br($0) < br($1) }) {
+            cands.append(StreamInfo(url: url(f)!, headers: ["User-Agent": c.ua], bitrate: br(f), source: c.source, muxed: true))
+        }
+        if cands.isEmpty { throw ResolveError(message: "\(c.source): no direct audio url") }
+        for cand in cands.prefix(3) { if await probe(cand) { return cand } }
+        throw ResolveError(message: "\(c.source): links rejected (403)")
     }
 
     static func search(_ q: String) async throws -> [Hit] {
@@ -170,25 +203,83 @@ actor Piped {
     }
 }
 
-// MARK: - Stream resolver: fastest source wins, results cached, bad sources skipped on retry
+// MARK: - Stream resolver: every source is verified (probe) before it can win; reasons are recorded for the UI
+struct ResolveJob: Sendable { let name: String; let run: @Sendable () async throws -> StreamInfo }
+
+func firstWorking(_ jobs: [ResolveJob]) async -> (StreamInfo?, [String]) {
+    await withTaskGroup(of: (StreamInfo?, String?).self) { g in
+        for j in jobs {
+            g.addTask {
+                do { return (try await j.run(), nil) }
+                catch { return (nil, (error as? ResolveError)?.message ?? "\(j.name): \((error as? URLError)?.code.rawValue ?? -1)") }
+            }
+        }
+        var notes: [String] = []
+        while let (s, n) = await g.next() {
+            if let s { g.cancelAll(); return (s, notes) }
+            if let n { notes.append(n) }
+        }
+        return (nil, notes)
+    }
+}
+
 actor Resolver {
     static let shared = Resolver()
     private var cache: [String: (StreamInfo, Date)] = [:]
     private var bad: [String: Set<String>] = [:]
+    private(set) var lastReport = ""
 
     func stream(_ id: String, fresh: Bool = false) async throws -> StreamInfo {
-        if !fresh, let c = cache[id], Date().timeIntervalSince(c.1) < 4 * 3600 { return c.0 }
-        let skip = bad[id] ?? []
-        var jobs: [@Sendable () async throws -> StreamInfo] = []
-        if !skip.contains("android_vr") { jobs.append { try await IT.player(id, IT.androidVR) } }
-        if !skip.contains("ios") { jobs.append { try await IT.player(id, IT.ios) } }
-        if !skip.contains("piped") { jobs.append { try await Piped.shared.stream(id) } }
-        if jobs.isEmpty { bad[id] = nil; return try await stream(id, fresh: true) }
-        let s = try await race(jobs)
-        cache[id] = (s, Date()); return s
+        if !fresh, let c = cache[id], Date().timeIntervalSince(c.1) < 3 * 3600 { return c.0 }
+        var skip = bad[id] ?? []
+        var notes: [String] = []
+        for round in 0..<2 {   // round 2 ignores the "bad" list so a temporary failure never blocks a source forever
+            var jobs: [ResolveJob] = []
+            func add(_ name: String, _ run: @escaping @Sendable () async throws -> StreamInfo) { if !skip.contains(name) { jobs.append(ResolveJob(name: name, run: run)) } }
+            add("android_vr") { try await IT.player(id, IT.androidVR) }
+            add("android_vr_old") { try await IT.player(id, IT.androidVROld) }
+            add("ios") { try await IT.player(id, IT.ios) }
+            add("piped") {
+                let s = try await Piped.shared.stream(id)
+                guard await IT.probe(s) else { throw ResolveError(message: "piped: links rejected") }
+                return s
+            }
+            if jobs.isEmpty { skip = []; bad[id] = nil; continue }
+            let (s, n) = await firstWorking(jobs)
+            notes += n
+            if let s { cache[id] = (s, Date()); lastReport = ""; return s }
+            if round == 0 { skip = []; bad[id] = nil }
+        }
+        lastReport = notes.joined(separator: " | ")
+        throw ResolveError(message: lastReport.isEmpty ? "no source answered" : lastReport)
     }
     func markBad(_ id: String, source: String) { bad[id, default: []].insert(source); cache[id] = nil }
     func prefetch(_ id: String) async { _ = try? await stream(id) }
+}
+
+// MARK: - Last-resort FULL-LENGTH source (Audius). No previews are ever played.
+struct Fallback: Sendable {
+    let url: URL; let label: String
+    private static func norm(_ s: String) -> String {
+        s.lowercased().folding(options: .diacriticInsensitive, locale: nil)
+            .components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }.joined(separator: " ")
+    }
+    private static func similar(_ a: String, _ b: String) -> Bool {
+        let x = norm(a), y = norm(b); guard x.count >= 3, y.count >= 3 else { return false }
+        return x.contains(y) || y.contains(x)
+    }
+    static func find(title: String, artist: String) async -> Fallback? {
+        let clean = title.replacingOccurrences(of: #"\(.*?\)|\[.*?\]"#, with: "", options: .regularExpression)
+        // 1) Audius: free, full-length tracks (limited catalogue)
+        var c = URLComponents(string: "https://api.audius.co/v1/tracks/search")!
+        c.queryItems = [URLQueryItem(name: "app_name", value: "Auralis"), URLQueryItem(name: "query", value: clean + " " + artist)]
+        struct AR: Decodable { struct T: Decodable { let id: String; let title: String }; let data: [T] }
+        if let (d, _) = try? await URLSession.shared.data(from: c.url!), let r = try? JSONDecoder().decode(AR.self, from: d),
+           let t = r.data.first(where: { similar($0.title, clean) }), let u = URL(string: "https://api.audius.co/v1/tracks/\(t.id)/stream?app_name=Auralis") {
+            return Fallback(url: u, label: "Playing from Audius")
+        }
+        return nil
+    }
 }
 
 // MARK: - Catalog: search / albums with cache + fallback

@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 
 // MARK: - Regions
@@ -125,26 +126,54 @@ final class Downloader: NSObject, URLSessionDownloadDelegate {
     func downloadAll(_ list: [Track]) {
         Task { for t in list where t.ytID != nil && !isDownloaded(t.ytID!) { download(t); try? await Task.sleep(for: .milliseconds(400)) } }
     }
+    /// muxed (video+audio) mp4 -> audio-only m4a
+    nonisolated static func extractAudio(_ src: URL, to dest: URL) async throws {
+        let asset = AVURLAsset(url: src)
+        guard let ex = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else { throw URLError(.cannotCreateFile) }
+        ex.outputURL = dest; ex.outputFileType = .m4a
+        await ex.export()
+        guard ex.status == .completed else { throw ex.error ?? URLError(.cannotCreateFile) }
+    }
+    nonisolated static func isPlayable(_ u: URL) async -> Bool {
+        (try? await AVURLAsset(url: u).load(.isPlayable)) ?? false
+    }
     private func run(_ t: Track, _ yt: String) async {
         defer { progress[yt] = nil }
-        for attempt in 0..<2 {
+        var reason = ""
+        for attempt in 0..<3 {
             do {
-                let s = try await Resolver.shared.stream(yt, fresh: attempt > 0)
-                var req = URLRequest(url: s.url, timeoutInterval: 30)
+                let s = try await Resolver.shared.stream(yt, fresh: attempt > 0)   // links are probed before use, so a dead link never gets here
+                var req = URLRequest(url: s.url, timeoutInterval: 60)
                 s.headers.forEach { req.setValue($1, forHTTPHeaderField: $0) }
+                req.setValue("bytes=0-", forHTTPHeaderField: "Range")
                 let tmp = try await Downloader().run(req) { p in
                     Task { @MainActor in if p - (self.progress[yt] ?? 0) >= 0.03 { self.progress[yt] = p } }
                 }
                 let name = "\(yt).m4a", dest = fileURL(name)
                 try? FileManager.default.removeItem(at: dest)
-                try FileManager.default.moveItem(at: tmp, to: dest)
+                if s.muxed {
+                    let mp4 = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
+                    try FileManager.default.moveItem(at: tmp, to: mp4)
+                    defer { try? FileManager.default.removeItem(at: mp4) }
+                    try await Self.extractAudio(mp4, to: dest)
+                } else {
+                    try FileManager.default.moveItem(at: tmp, to: dest)
+                }
+                guard await Self.isPlayable(dest) else {
+                    try? FileManager.default.removeItem(at: dest)
+                    throw ResolveError(message: "file not playable")
+                }
                 var art: String?
                 if let (d, _) = try? await URLSession.shared.data(from: Track.ytThumb(yt)) { try? d.write(to: fileURL("\(yt).jpg")); art = "\(yt).jpg" }
                 items.removeAll { $0.yt == yt }
                 items.insert(DownloadedItem(yt: yt, title: t.title, artist: t.artist, duration: t.duration, file: name, art: art), at: 0)
                 save(); return
-            } catch { if attempt == 1 { lastError = "Download failed for “\(t.title)”. Check your internet and try again." } }
+            } catch {
+                reason = (error as? ResolveError)?.message ?? (error as? URLError).map { "network \($0.code.rawValue)" } ?? error.localizedDescription
+                try? await Task.sleep(for: .milliseconds(600))
+            }
         }
+        lastError = "Download failed for “\(t.title)” (\(reason.prefix(100)))"
     }
     func delete(_ i: DownloadedItem) {
         try? FileManager.default.removeItem(at: fileURL(i.file))
