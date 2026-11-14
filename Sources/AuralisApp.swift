@@ -10,14 +10,12 @@ import SwiftUI
     @StateObject private var ui = UIState()
     @AppStorage("onboarded") private var onboarded = false
     @AppStorage("setupDone") private var setupDone = false
-    @AppStorage("signInAsked") private var signInAsked = false
     @AppStorage("theme") private var theme = 0
     var body: some Scene {
         WindowGroup {
             Group {
                 if !onboarded { WelcomeView(onboarded: $onboarded) }
                 else if !setupDone { SetupView() }     // asks username + region the first time
-                else if !signInAsked { SignInView(asked: $signInAsked) }   // "Continue with Google" (can be skipped)
                 else { RootView() }
             }
             .environmentObject(player).environmentObject(library).environmentObject(videos).environmentObject(folders)

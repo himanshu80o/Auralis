@@ -213,8 +213,6 @@ struct SetupView: View {
 }
 
 struct ProfileSheet: View {
-    @ObservedObject private var auth = YTAuth.shared
-    @State private var showLogin = false
     @EnvironmentObject var dl: DownloadManager
     @EnvironmentObject var favs: FavoritesStore
     @AppStorage("username") private var username = ""
@@ -238,20 +236,11 @@ struct ProfileSheet: View {
                         }
                     }.listRowBackground(pal.surface)
                     Section {
-                        if auth.signedIn {
-                            Label("Google account connected", systemImage: "checkmark.seal.fill")
-                            Button("Sign out of Google", role: .destructive) { Task { await auth.signOut() } }
-                        } else {
-                            Button { showLogin = true } label: { Label("Continue with Google", systemImage: "person.crop.circle.badge.checkmark") }
-                        }
-                    }.listRowBackground(pal.surface)
-                    Section {
                         NavigationLink { DownloadsScreen() } label: { Label("My Downloads (\(dl.items.count))", systemImage: "arrow.down.circle.fill") }
                         NavigationLink { TrackListScreen(title: "Favourites", tracks: favs.items) } label: { Label("Favourites (\(favs.items.count))", systemImage: "heart.fill") }
                     }.listRowBackground(pal.surface)
                 }.scrollContentBackground(.hidden).foregroundStyle(pal.text)
             }
-            .sheet(isPresented: $showLogin) { GoogleLoginSheet { } }
             .navigationTitle("Profile").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         }.tint(pal.accent)

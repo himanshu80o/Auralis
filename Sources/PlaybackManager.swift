@@ -34,11 +34,19 @@ enum RepeatMode: CaseIterable { case off, all, one }
     private var triedDownload = false
     private var playerNote = ""
     private var seeking = false
+    private var usingEmbed = false
+    private var embedFailed: Set<String> = []
+    private var embedWatch: Task<Void, Never>?
+    private var lastReason = ""
     private let player = AVPlayer()
     var current: Track? { queue.indices.contains(index) ? queue[index] : nil }
 
     private init() {
         configureSession(); setupRemote()
+        let e = EmbedPlayer.shared
+        e.onState = { [weak self] st in self?.embedState(st) }
+        e.onTime = { [weak self] t, d in self?.embedTime(t, d) }
+        e.onError = { [weak self] c in self?.embedError(c) }
         player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { [weak self] t in
             Task { @MainActor in
                 guard let s = self, !s.seeking else { return }
@@ -85,7 +93,7 @@ enum RepeatMode: CaseIterable { case off, all, one }
         else { queue = original; index = original.firstIndex(of: cur) ?? 0 }
     }
     func stop() {
-        loadTask?.cancel(); watchdog?.cancel(); statusObs = nil
+        loadTask?.cancel(); watchdog?.cancel(); statusObs = nil; leaveEmbed()
         player.pause(); player.replaceCurrentItem(with: nil)
         queue = []; index = 0; isPlaying = false; isResolving = false; streamError = nil
         clock.position = 0; clock.duration = 0
@@ -94,7 +102,7 @@ enum RepeatMode: CaseIterable { case off, all, one }
 
     // MARK: loading
     private func load() {
-        loadTask?.cancel(); watchdog?.cancel(); statusObs = nil
+        loadTask?.cancel(); watchdog?.cancel(); statusObs = nil; leaveEmbed()
         guard let t = current else { return }
         streamError = nil; retries = 0; triedDownload = false; playerNote = ""; seeking = false
         clock.duration = t.duration; clock.position = 0
@@ -123,16 +131,61 @@ enum RepeatMode: CaseIterable { case off, all, one }
             }
         }
     }
-    /// Every YouTube route failed: try Audius / Apple preview, otherwise show the exact reason.
+    /// Every direct route failed: use YouTube's official embedded player; if that is blocked for this video, try Audius; else show the reason.
     private func playFallback(_ t: Track, reason: String) async {
+        lastReason = reason
+        if let id = t.ytID, !embedFailed.contains(id) { startEmbed(t, id); return }
         isResolving = true
         let fb = await Fallback.find(title: t.title, artist: t.artist)
         guard !Task.isCancelled, current?.id == t.id else { return }
         isResolving = false
         if let fb { streamError = fb.label; startItem(fb.url); return }
         isPlaying = false; player.replaceCurrentItem(with: nil)
-        streamError = reason.isEmpty ? "Couldn't load this track. Tap play to retry." : "Couldn't load this track (\(reason.prefix(220)))"
+        streamError = lastReason.isEmpty ? "Couldn't load this track. Tap play to retry." : "Couldn't load this track (\(lastReason.prefix(220)))"
     }
+
+    // MARK: official YouTube player (hidden web view)
+    private func startEmbed(_ t: Track, _ id: String) {
+        usingEmbed = true; onlineID = nil
+        isResolving = true; isPlaying = false; streamError = nil
+        player.pause(); player.replaceCurrentItem(with: nil)
+        try? AVAudioSession.sharedInstance().setActive(true)
+        EmbedPlayer.shared.load(id)
+        updateNowPlaying()
+        embedWatch?.cancel()
+        embedWatch = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(15))
+            guard !Task.isCancelled, let self, self.usingEmbed, self.isResolving else { return }
+            self.embedError(-1)
+        }
+    }
+    private func leaveEmbed() {
+        embedWatch?.cancel()
+        if usingEmbed { usingEmbed = false; EmbedPlayer.shared.stop() }
+    }
+    private func embedState(_ st: Int) {
+        guard usingEmbed else { return }
+        switch st {
+        case 1: embedWatch?.cancel(); isResolving = false; isPlaying = true; streamError = nil; updateNowPlaying()
+        case 2: if !isResolving { isPlaying = false; updateNowPlaying() }
+        case 0: trackEnded()
+        default: break
+        }
+    }
+    private func embedTime(_ t: Double, _ d: Double) {
+        guard usingEmbed, !seeking else { return }
+        if t.isFinite, abs(t - clock.position) > 0.2 { clock.position = t }
+        if d.isFinite, d > 0, abs(d - clock.duration) > 0.5 { clock.duration = d }
+    }
+    private func embedError(_ code: Int) {
+        guard usingEmbed, let t = current else { return }
+        leaveEmbed()
+        if let id = t.ytID { embedFailed.insert(id) }
+        lastReason += (lastReason.isEmpty ? "" : " | ") + "yt-player \(code)"
+        loadTask?.cancel()
+        loadTask = Task { [weak self] in await self?.playFallback(t, reason: self?.lastReason ?? "") }
+    }
+
     private func startItem(_ url: URL, headers: [String: String] = [:], onlineID: String? = nil, source: String = "") {
         self.onlineID = onlineID; self.source = source
         try? AVAudioSession.sharedInstance().setActive(true)
@@ -221,14 +274,20 @@ enum RepeatMode: CaseIterable { case off, all, one }
 
     // MARK: transport
     func play() {
-        if streamError != nil, player.currentItem == nil, let t = current, let id = t.ytID { streamError = nil; loadOnline(t, id, fresh: true); return }   // retry after a failed load
+        if usingEmbed { EmbedPlayer.shared.play(); isPlaying = true; updateNowPlaying(); return }
+        if streamError != nil, player.currentItem == nil, let t = current, let id = t.ytID { streamError = nil; embedFailed.remove(id); loadOnline(t, id, fresh: true); return }   // retry after a failed load
         player.play(); isPlaying = true; updateNowPlaying()
     }
-    func pause() { player.pause(); isPlaying = false; updateNowPlaying() }
+    func pause() { if usingEmbed { EmbedPlayer.shared.pause() } else { player.pause() }; isPlaying = false; updateNowPlaying() }
     func toggle() { isPlaying ? pause() : play() }
     func seek(_ s: Double) {
         let target = max(0, min(s, clock.duration > 0 ? clock.duration : s))
         seeking = true; clock.position = target
+        if usingEmbed {
+            EmbedPlayer.shared.seek(target)
+            Task { [weak self] in try? await Task.sleep(for: .milliseconds(700)); self?.seeking = false; self?.updateNowPlaying() }
+            return
+        }
         player.seek(to: CMTime(seconds: target, preferredTimescale: 600)) { [weak self] _ in
             Task { @MainActor in self?.seeking = false; self?.updateNowPlaying() }
         }

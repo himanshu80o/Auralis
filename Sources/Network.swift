@@ -55,7 +55,7 @@ actor VisitorStore {
 
 // MARK: - YouTube InnerTube (direct data API: JSON only, no web page, no ads)
 enum IT {
-    struct Client { let name, version, ua, source: String; let id: Int; let extra: [String: Any]; var thirdParty = false; var auth = false }
+    struct Client { let name, version, ua, source: String; let id: Int; let extra: [String: Any]; var thirdParty = false }
     // Newer ANDROID_VR build (what yt-dlp uses now) plus the older one, both tried in parallel.
     static let androidVR = Client(name: "ANDROID_VR", version: "1.65.10",
         ua: "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
@@ -75,11 +75,6 @@ enum IT {
     static let tv = Client(name: "TVHTML5", version: "7.20250120.19.00",
         ua: "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
         source: "tv", id: 7, extra: [:])
-
-    /// Same client, but sending the signed-in Google session (only used when the user signed in).
-    static func acct(_ c: Client) -> Client {
-        Client(name: c.name, version: c.version, ua: c.ua, source: c.source + "_acct", id: c.id, extra: c.extra, thirdParty: c.thirdParty, auth: true)
-    }
 
     /// Cheap check that a stream URL really answers (YouTube often hands out URLs that later return 403).
     static func probe(_ s: StreamInfo) async -> Bool {
@@ -111,12 +106,6 @@ enum IT {
         req.setValue(c.version, forHTTPHeaderField: "X-YouTube-Client-Version")
         var client: [String: Any] = ["clientName": c.name, "clientVersion": c.version, "hl": "en", "gl": Regions.current]
         c.extra.forEach { client[$0.key] = $0.value }
-        if c.auth {
-            let h = await YTAuth.shared.requestHeaders()
-            if h.isEmpty { throw ResolveError(message: "\(c.source): not signed in") }
-            h.forEach { req.setValue($1, forHTTPHeaderField: $0) }
-            req.httpShouldHandleCookies = false
-        }
         if let vd = await VisitorStore.shared.get() { client["visitorData"] = vd; req.setValue(vd, forHTTPHeaderField: "X-Goog-Visitor-Id") }
         var context: [String: Any] = ["client": client]
         if c.thirdParty { context["thirdParty"] = ["embedUrl": "https://www.youtube.com/"] }
@@ -287,14 +276,6 @@ actor Resolver {
             add("android_vr") { try await IT.player(id, IT.androidVR) }
             add("android_vr_old") { try await IT.player(id, IT.androidVROld) }
             add("ios") { try await IT.player(id, IT.ios) }
-            add("tv_embed") { try await IT.player(id, IT.tvEmbed) }
-            add("tv") { try await IT.player(id, IT.tv) }
-            if await YTAuth.shared.signedIn {   // signed-in variants first-class: they are what gets past the "confirm you're not a bot" gate
-                add("ios_acct") { try await IT.player(id, IT.acct(IT.ios)) }
-                add("tv_acct") { try await IT.player(id, IT.acct(IT.tv)) }
-                add("tv_embed_acct") { try await IT.player(id, IT.acct(IT.tvEmbed)) }
-                add("android_vr_acct") { try await IT.player(id, IT.acct(IT.androidVR)) }
-            }
             add("piped") {
                 let s = try await Piped.shared.stream(id)
                 guard await IT.probe(s) else { throw ResolveError(message: "piped: links rejected") }
