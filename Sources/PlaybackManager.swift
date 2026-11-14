@@ -31,6 +31,8 @@ enum RepeatMode: CaseIterable { case off, all, one }
     private var onlineID: String?
     private var source = ""
     private var retries = 0
+    private var triedDownload = false
+    private var playerNote = ""
     private var seeking = false
     private let player = AVPlayer()
     var current: Track? { queue.indices.contains(index) ? queue[index] : nil }
@@ -94,7 +96,7 @@ enum RepeatMode: CaseIterable { case off, all, one }
     private func load() {
         loadTask?.cancel(); watchdog?.cancel(); statusObs = nil
         guard let t = current else { return }
-        streamError = nil; retries = 0; seeking = false
+        streamError = nil; retries = 0; triedDownload = false; playerNote = ""; seeking = false
         clock.duration = t.duration; clock.position = 0
         if let yt = t.ytID, let local = DownloadManager.shared.localURL(yt) { isResolving = false; startItem(local); return }   // downloaded = instant + offline
         if let url = t.url { isResolving = false; startItem(url); return }
@@ -140,7 +142,11 @@ enum RepeatMode: CaseIterable { case off, all, one }
             Task { @MainActor in
                 guard let self else { return }
                 if st == .readyToPlay { self.retries = 0; self.watchdog?.cancel() }
-                else if st == .failed { self.itemFailed() }
+                else if st == .failed {
+                    let code = item.errorLog()?.events.last?.errorStatusCode ?? 0
+                    self.playerNote = "avf \((item.error as NSError?)?.code ?? 0) http \(code)"
+                    self.itemFailed()
+                }
             }
         }
         player.replaceCurrentItem(with: item)
@@ -150,16 +156,52 @@ enum RepeatMode: CaseIterable { case off, all, one }
             watchdog = Task { [weak self] in
                 try? await Task.sleep(for: .seconds(12))
                 guard !Task.isCancelled, let self, self.player.currentItem === item, item.status != .readyToPlay else { return }
+                self.playerNote = "timeout"
                 self.itemFailed()
             }
         }
         prefetchNext()
     }
+    /// Streaming straight from the link failed: download the whole song first, then play the local file (works even when YouTube refuses ranged streaming).
+    private func cacheLocally(_ id: String) async -> URL? {
+        for attempt in 0..<2 {
+            guard let s = try? await Resolver.shared.stream(id, fresh: attempt > 0) else { continue }
+            var req = URLRequest(url: s.url, timeoutInterval: 60)
+            s.headers.forEach { req.setValue($1, forHTTPHeaderField: $0) }
+            req.setValue("bytes=0-", forHTTPHeaderField: "Range")
+            guard let tmp = try? await Downloader().run(req, progress: { _ in }) else { continue }
+            let dir = FileManager.default.temporaryDirectory
+            let dest = dir.appendingPathComponent("play-\(id).m4a")
+            try? FileManager.default.removeItem(at: dest)
+            if s.muxed {
+                let mp4 = dir.appendingPathComponent(UUID().uuidString + ".mp4")
+                guard (try? FileManager.default.moveItem(at: tmp, to: mp4)) != nil else { continue }
+                let ok = (try? await DownloadManager.extractAudio(mp4, to: dest)) != nil
+                try? FileManager.default.removeItem(at: mp4)
+                guard ok else { continue }
+            } else {
+                guard (try? FileManager.default.moveItem(at: tmp, to: dest)) != nil else { continue }
+            }
+            if await DownloadManager.isPlayable(dest) { return dest }
+        }
+        return nil
+    }
     private func itemFailed() {
         guard let t = current else { return }
+        if let id = onlineID, !triedDownload {
+            triedDownload = true; isResolving = true; player.pause(); loadTask?.cancel()
+            loadTask = Task { [weak self] in
+                guard let self else { return }
+                let local = await self.cacheLocally(id)
+                guard !Task.isCancelled, self.current?.id == t.id else { return }
+                self.isResolving = false
+                if let local { self.startItem(local) } else { self.itemFailed() }
+            }
+            return
+        }
         guard let id = onlineID, retries < 3 else {
             loadTask?.cancel()
-            loadTask = Task { [weak self] in await self?.playFallback(t, reason: "player failed") }
+            loadTask = Task { [weak self] in await self?.playFallback(t, reason: "player failed: \(self?.playerNote ?? "")") }
             return
         }
         retries += 1; let src = source

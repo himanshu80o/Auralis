@@ -55,12 +55,23 @@ enum IT {
 
     /// Cheap check that a stream URL really answers (YouTube often hands out URLs that later return 403).
     static func probe(_ s: StreamInfo) async -> Bool {
-        var r = URLRequest(url: s.url, timeoutInterval: 8)
-        s.headers.forEach { r.setValue($1, forHTTPHeaderField: $0) }
-        r.setValue("bytes=0-1", forHTTPHeaderField: "Range")
-        guard let (bytes, resp) = try? await URLSession.shared.bytes(for: r), let h = resp as? HTTPURLResponse else { return false }
-        _ = bytes   // body is never read; leaving scope cancels the transfer
-        return h.statusCode == 200 || h.statusCode == 206
+        func req(_ range: String) -> URLRequest {
+            var r = URLRequest(url: s.url, timeoutInterval: 8)
+            s.headers.forEach { r.setValue($1, forHTTPHeaderField: $0) }
+            r.setValue(range, forHTTPHeaderField: "Range")
+            return r
+        }
+        guard let (b1, r1) = try? await URLSession.shared.bytes(for: req("bytes=0-1")), let h1 = r1 as? HTTPURLResponse,
+              h1.statusCode == 200 || h1.statusCode == 206 else { return false }
+        _ = b1   // body is never read; leaving scope cancels the transfer
+        // YouTube sometimes allows the first bytes and then refuses the rest ("sustained playback" PO-token check):
+        // also ask for the LAST bytes of the file, which is exactly what AVPlayer does when it looks for the moov atom.
+        guard h1.statusCode == 206, let cr = h1.value(forHTTPHeaderField: "Content-Range"),
+              let total = Int(cr.split(separator: "/").last ?? ""), total > 4096 else { return true }
+        guard let (b2, r2) = try? await URLSession.shared.bytes(for: req("bytes=\(total - 2)-\(total - 1)")),
+              (r2 as? HTTPURLResponse)?.statusCode == 206 else { return false }
+        _ = b2
+        return true
     }
 
     static func player(_ id: String, _ c: Client) async throws -> StreamInfo {
