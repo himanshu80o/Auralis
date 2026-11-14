@@ -13,10 +13,10 @@ import SwiftUI
         get { UserDefaults.standard.array(forKey: key) as? [Data] ?? [] }
         set { UserDefaults.standard.set(newValue, forKey: key) }
     }
-    static let exts: Set<String> = ["mp3", "m4a", "aac", "wav", "aif", "aiff", "caf", "alac", "flac"]
+    nonisolated static let exts: Set<String> = ["mp3", "m4a", "aac", "wav", "aif", "aiff", "caf", "alac", "flac"]
 
     struct Meta: Codable, Sendable { let path: String; let mtime: Double; let title, artist, album: String; let duration: Double }
-    private static var cacheURL: URL { FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("folder-meta.json") }
+    nonisolated private static var cacheURL: URL { FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("folder-meta.json") }
 
     init() { Task { await rescan() } }
 
