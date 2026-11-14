@@ -131,7 +131,7 @@ enum RepeatMode: CaseIterable { case off, all, one }
         isResolving = false
         if let fb { streamError = fb.label; startItem(fb.url); return }
         isPlaying = false; player.replaceCurrentItem(with: nil)
-        streamError = reason.isEmpty ? "Couldn't load this track. Tap play to retry." : "Couldn't load this track (\(reason.prefix(110)))"
+        streamError = reason.isEmpty ? "Couldn't load this track. Tap play to retry." : "Couldn't load this track (\(reason.prefix(220)))"
     }
     private func startItem(_ url: URL, headers: [String: String] = [:], onlineID: String? = nil, source: String = "") {
         self.onlineID = onlineID; self.source = source

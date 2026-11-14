@@ -36,9 +36,26 @@ func parseDuration(_ s: String) -> Double {
     s.split(separator: ":").compactMap { Double($0) }.reduce(0) { $0 * 60 + $1 }
 }
 
+/// Anonymous "visitor" identity, the same thing a normal YouTube app sends. Requests without it look more like a bot.
+actor VisitorStore {
+    static let shared = VisitorStore()
+    private var value: String?
+    func get() async -> String? {
+        if let value { return value }
+        value = await Self.fetch(); return value
+    }
+    nonisolated static func fetch() async -> String? {
+        var r = URLRequest(url: URL(string: "https://www.youtube.com/")!, timeoutInterval: 6)
+        r.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
+        guard let (d, _) = try? await URLSession.shared.data(for: r), let html = String(data: d, encoding: .utf8),
+              let m = html.range(of: #""visitorData":"([^"]+)""#, options: .regularExpression) else { return nil }
+        return String(html[m].dropFirst(15).dropLast()).removingPercentEncoding
+    }
+}
+
 // MARK: - YouTube InnerTube (direct data API: JSON only, no web page, no ads)
 enum IT {
-    struct Client { let name, version, ua, source: String; let id: Int; let extra: [String: Any] }
+    struct Client { let name, version, ua, source: String; let id: Int; let extra: [String: Any]; var thirdParty = false; var auth = false }
     // Newer ANDROID_VR build (what yt-dlp uses now) plus the older one, both tried in parallel.
     static let androidVR = Client(name: "ANDROID_VR", version: "1.65.10",
         ua: "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
@@ -52,6 +69,17 @@ enum IT {
         ua: "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
         source: "ios", id: 5,
         extra: ["deviceMake": "Apple", "deviceModel": "iPhone16,2", "osName": "iPhone", "osVersion": "18.3.2.22D82"])
+    static let tvEmbed = Client(name: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", version: "2.0",
+        ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.1",
+        source: "tv_embed", id: 85, extra: [:], thirdParty: true)
+    static let tv = Client(name: "TVHTML5", version: "7.20250120.19.00",
+        ua: "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
+        source: "tv", id: 7, extra: [:])
+
+    /// Same client, but sending the signed-in Google session (only used when the user signed in).
+    static func acct(_ c: Client) -> Client {
+        Client(name: c.name, version: c.version, ua: c.ua, source: c.source + "_acct", id: c.id, extra: c.extra, thirdParty: c.thirdParty, auth: true)
+    }
 
     /// Cheap check that a stream URL really answers (YouTube often hands out URLs that later return 403).
     static func probe(_ s: StreamInfo) async -> Bool {
@@ -83,13 +111,22 @@ enum IT {
         req.setValue(c.version, forHTTPHeaderField: "X-YouTube-Client-Version")
         var client: [String: Any] = ["clientName": c.name, "clientVersion": c.version, "hl": "en", "gl": Regions.current]
         c.extra.forEach { client[$0.key] = $0.value }
-        let body: [String: Any] = ["context": ["client": client], "videoId": id, "contentCheckOk": true, "racyCheckOk": true]
+        if c.auth {
+            let h = await YTAuth.shared.requestHeaders()
+            if h.isEmpty { throw ResolveError(message: "\(c.source): not signed in") }
+            h.forEach { req.setValue($1, forHTTPHeaderField: $0) }
+            req.httpShouldHandleCookies = false
+        }
+        if let vd = await VisitorStore.shared.get() { client["visitorData"] = vd; req.setValue(vd, forHTTPHeaderField: "X-Goog-Visitor-Id") }
+        var context: [String: Any] = ["client": client]
+        if c.thirdParty { context["thirdParty"] = ["embedUrl": "https://www.youtube.com/"] }
+        let body: [String: Any] = ["context": context, "videoId": id, "contentCheckOk": true, "racyCheckOk": true]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (d, _) = try await URLSession.shared.data(for: req)
         let j = try JSONSerialization.jsonObject(with: d)
         guard let sd = dig(j, ["streamingData"]) as? [String: Any] else {
             let st = dig(j, ["playabilityStatus", "status"]) as? String ?? "NO_DATA"
-            let why = (dig(j, ["playabilityStatus", "reason"]) as? String ?? "").prefix(40)
+            let why = (dig(j, ["playabilityStatus", "reason"]) as? String ?? "").lowercased().contains("not a bot") ? "bot-check" : ""
             throw ResolveError(message: "\(c.source): \(st) \(why)")
         }
         func mime(_ f: [String: Any]) -> String { (f["mimeType"] as? String) ?? "" }
@@ -250,6 +287,14 @@ actor Resolver {
             add("android_vr") { try await IT.player(id, IT.androidVR) }
             add("android_vr_old") { try await IT.player(id, IT.androidVROld) }
             add("ios") { try await IT.player(id, IT.ios) }
+            add("tv_embed") { try await IT.player(id, IT.tvEmbed) }
+            add("tv") { try await IT.player(id, IT.tv) }
+            if await YTAuth.shared.signedIn {   // signed-in variants first-class: they are what gets past the "confirm you're not a bot" gate
+                add("ios_acct") { try await IT.player(id, IT.acct(IT.ios)) }
+                add("tv_acct") { try await IT.player(id, IT.acct(IT.tv)) }
+                add("tv_embed_acct") { try await IT.player(id, IT.acct(IT.tvEmbed)) }
+                add("android_vr_acct") { try await IT.player(id, IT.acct(IT.androidVR)) }
+            }
             add("piped") {
                 let s = try await Piped.shared.stream(id)
                 guard await IT.probe(s) else { throw ResolveError(message: "piped: links rejected") }
@@ -264,6 +309,7 @@ actor Resolver {
         lastReport = notes.joined(separator: " | ")
         throw ResolveError(message: lastReport.isEmpty ? "no source answered" : lastReport)
     }
+    func reset() { cache = [:]; bad = [:] }
     func markBad(_ id: String, source: String) { bad[id, default: []].insert(source); cache[id] = nil }
     func prefetch(_ id: String) async { _ = try? await stream(id) }
 }
