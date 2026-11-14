@@ -1,7 +1,8 @@
 import AVFoundation
 import SwiftUI
 
-/// Scans user-chosen Files folders. Access is saved as security-scoped bookmarks so the user picks once.
+/// Scans user-chosen Files folders (security-scoped bookmarks). Scanning runs off the main thread, in parallel,
+/// and results are cached by file modification date, so re-opening the app is instant even with thousands of songs.
 @MainActor final class FolderLibrary: ObservableObject {
     @Published var tracks: [Track] = []
     @Published var folderNames: [String] = []
@@ -13,6 +14,9 @@ import SwiftUI
         set { UserDefaults.standard.set(newValue, forKey: key) }
     }
     static let exts: Set<String> = ["mp3", "m4a", "aac", "wav", "aif", "aiff", "caf", "alac", "flac"]
+
+    struct Meta: Codable, Sendable { let path: String; let mtime: Double; let title, artist, album: String; let duration: Double }
+    private static var cacheURL: URL { FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("folder-meta.json") }
 
     init() { Task { await rescan() } }
 
@@ -27,9 +31,10 @@ import SwiftUI
         bookmarks = []; tracks = []; folderNames = []
     }
     func rescan() async {
+        guard !scanning else { return }
         scanning = true; defer { scanning = false }
         open.forEach { $0.stopAccessingSecurityScopedResource() }; open = []
-        var found: [Track] = [], names: [String] = [], fresh: [Data] = []
+        var names: [String] = [], fresh: [Data] = []
         for data in bookmarks {
             var stale = false
             guard let url = try? URL(resolvingBookmarkData: data, bookmarkDataIsStale: &stale),
@@ -37,11 +42,14 @@ import SwiftUI
             open.append(url)   // keep access open while files may be playing
             names.append(url.lastPathComponent)
             fresh.append(stale ? ((try? url.bookmarkData()) ?? data) : data)
-            for f in Self.audioFiles(in: url) { found.append(await Self.makeTrack(f)) }
         }
         bookmarks = fresh; folderNames = names
+        let roots = open
+        let metas = await Task.detached(priority: .userInitiated) { await Self.scan(roots) }.value
         var seen = Set<UInt64>()
-        tracks = found.filter { seen.insert($0.id).inserted }.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+        tracks = metas.map { m in
+            Track(id: fnv(m.path), title: m.title, artist: m.artist, album: m.album, duration: m.duration, url: URL(fileURLWithPath: m.path), item: nil)
+        }.filter { seen.insert($0.id).inserted }.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
 
     func delete(_ t: Track) {
@@ -49,25 +57,46 @@ import SwiftUI
         try? FileManager.default.removeItem(at: u)
         tracks.removeAll { $0.id == t.id }
     }
-    nonisolated static func audioFiles(in dir: URL) -> [URL] {
-        guard let e = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return [] }
-        return e.compactMap { $0 as? URL }.filter { exts.contains($0.pathExtension.lowercased()) }
+
+    // MARK: background scanning
+    nonisolated static func scan(_ roots: [URL]) async -> [Meta] {
+        let files = audioFiles(in: roots)
+        var cache: [String: Meta] = [:]
+        if let d = try? Data(contentsOf: cacheURL), let l = try? JSONDecoder().decode([Meta].self, from: d) { l.forEach { cache[$0.path] = $0 } }
+        var out: [Meta] = []
+        for start in stride(from: 0, to: files.count, by: 8) {      // 8 files in parallel
+            let batch = Array(files[start..<min(start + 8, files.count)])
+            let part = await withTaskGroup(of: Meta.self) { g -> [Meta] in
+                for f in batch { g.addTask { await meta(f, cache[f.path]) } }
+                var r: [Meta] = []; for await m in g { r.append(m) }; return r
+            }
+            out += part
+        }
+        if let d = try? JSONEncoder().encode(out) { try? d.write(to: cacheURL) }
+        return out
     }
-    nonisolated static func makeTrack(_ url: URL) async -> Track {
+    nonisolated static func audioFiles(in roots: [URL]) -> [URL] {   // sync on purpose (NSEnumerator is not async-safe)
+        var files: [URL] = []
+        for r in roots {
+            guard let e = FileManager.default.enumerator(at: r, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) else { continue }
+            while let o = e.nextObject() { if let u = o as? URL, exts.contains(u.pathExtension.lowercased()) { files.append(u) } }
+        }
+        return files
+    }
+    nonisolated static func meta(_ url: URL, _ cached: Meta?) async -> Meta {
+        let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate?.timeIntervalSince1970) ?? 0
+        if let c = cached, c.mtime == mtime { return c }
         let asset = AVURLAsset(url: url)
         let meta = (try? await asset.load(.commonMetadata)) ?? []
         func text(_ id: AVMetadataIdentifier) async -> String? {
             guard let m = AVMetadataItem.metadataItems(from: meta, filteredByIdentifier: id).first else { return nil }
             return try? await m.load(.stringValue)
         }
-        var art: Data?
-        if let m = AVMetadataItem.metadataItems(from: meta, filteredByIdentifier: .commonIdentifierArtwork).first { art = try? await m.load(.dataValue) }
         let dur = (try? await asset.load(.duration).seconds) ?? 0
-        var h: UInt64 = 14695981039346656037          // stable FNV-1a id from path
-        for b in url.path.utf8 { h = (h ^ UInt64(b)) &* 1099511628211 }
-        return Track(id: h, title: await text(.commonIdentifierTitle) ?? url.deletingPathExtension().lastPathComponent,
-                     artist: await text(.commonIdentifierArtist) ?? "Unknown Artist",
-                     album: await text(.commonIdentifierAlbumName) ?? url.deletingLastPathComponent().lastPathComponent,
-                     duration: dur.isFinite ? dur : 0, url: url, item: nil, artworkData: art)
+        return Meta(path: url.path, mtime: mtime,
+                    title: await text(.commonIdentifierTitle) ?? url.deletingPathExtension().lastPathComponent,
+                    artist: await text(.commonIdentifierArtist) ?? "Unknown Artist",
+                    album: await text(.commonIdentifierAlbumName) ?? url.deletingLastPathComponent().lastPathComponent,
+                    duration: dur.isFinite ? dur : 0)
     }
 }

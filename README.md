@@ -1,7 +1,12 @@
-# AURALIS – Every Sound. Every Moment.
-Build: `brew install xcodegen && xcodegen generate && open Auralis.xcodeproj`, set your Team, run on a real device (iOS 17+).
-Online tab: Home-style layout (hero, recents, trending, albums), ad-free streaming via Piped API (JSON only, no web page), Audius fallback. Themes: Dark, Light, System, Neon Purple, Neon Blue (Settings). Background + screen-off playback via audio background mode. Optional: add an image set named "Avatar" for the profile photo.
-Implemented: onboarding + permissions, MPMediaQuery song discovery (auto-refresh), PhotoKit video discovery (iCloud-aware), AVPlayer background playback, interruption/route handling, lock-screen/Control Center/Bluetooth controls, queue, shuffle/repeat, mini + full player, search, settings.
-Files folders: Settings > Add folder (saved bookmarks, recursive audio scan, ID3/metadata + artwork).
-NOT yet built: SwiftData persistence, playlists, favorites, equalizer (AVAudioEngine), lyrics, visualizer, sleep timer, PiP/subtitles, CarPlay, Face ID lock.
-Limits: DRM/Apple Music/cloud-only items have no assetURL and can't be played by AVPlayer. iOS has no full-storage scan.
+# AURALIS — Every Sound. Every Moment.
+
+iOS 17+ SwiftUI music + video player. Build via XcodeGen (`project.yml`) / GitHub Actions.
+
+- **Music / Videos / Online / Settings** — same AURALIS logo + tagline header on every tab.
+- **Online**: Home-style layout, region-based trending + albums, fast search (YouTube data sources raced in parallel), instant playback with auto-fallback between sources, prefetch of the next track.
+- **Downloads**: highest-bitrate AAC available, saved to Documents/Auralis Downloads (visible in Files app). Profile → My Downloads plays them offline.
+- **Profile** (top-right in Online): username, region, My Downloads, Favourites. Asked on first launch.
+- **Favourites**: heart in the mini player and full player for online songs.
+- **Player**: tap or drag the seek bar to jump anywhere; background + screen-off playback; lock-screen controls.
+- **Themes**: Dark, Light, System, Neon Purple, Neon Blue. Settings text is always white.
+- Long-press the mini player → "Close player".

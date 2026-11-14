@@ -1,37 +1,55 @@
 import AVFoundation
 import MediaPlayer
 import UIKit
+import Combine
 
 enum RepeatMode: CaseIterable { case off, all, one }
 
+/// Position/duration live in their own object so the 2x/second ticks only redraw the progress bars, not the whole app.
+@MainActor final class PlayClock: ObservableObject {
+    @Published var position = 0.0
+    @Published var duration = 0.0
+}
+
 @MainActor final class PlaybackManager: ObservableObject {
     static let shared = PlaybackManager()
+    let clock = PlayClock()
     @Published var queue: [Track] = []
     @Published var index = 0
     @Published var isPlaying = false
-    @Published var position = 0.0
-    @Published var duration = 0.0
+    @Published var isResolving = false
+    @Published var streamError: String?
     @Published var repeatMode = RepeatMode.off
     @Published var shuffle = false { didSet { applyShuffle() } }
     @Published var sleepEnd: Date?
-    var scrubbing = false
+
     private var sleepTask: Task<Void, Never>?
+    private var loadTask: Task<Void, Never>?
+    private var watchdog: Task<Void, Never>?
+    private var statusObs: AnyCancellable?
     private var original: [Track] = []
+    private var onlineID: String?
+    private var source = ""
+    private var retries = 0
+    private var seeking = false
     private let player = AVPlayer()
     var current: Track? { queue.indices.contains(index) ? queue[index] : nil }
 
     private init() {
         configureSession(); setupRemote()
-        player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { [weak self] t in
+        player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { [weak self] t in
             Task { @MainActor in
-                guard let s = self else { return }
-                if s.scrubbing { return }
-                s.position = t.seconds.isFinite ? t.seconds : 0
-                if let d = s.player.currentItem?.duration.seconds, d.isFinite, d > 0, abs(d - s.duration) > 0.5 { s.duration = d }
+                guard let s = self, !s.seeking else { return }
+                let p = t.seconds.isFinite ? t.seconds : 0
+                if abs(p - s.clock.position) > 0.2 { s.clock.position = p }
+                if let d = s.player.currentItem?.duration.seconds, d.isFinite, d > 0, abs(d - s.clock.duration) > 0.5 { s.clock.duration = d }
             }
         }
         let nc = NotificationCenter.default
-        nc.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.trackEnded() } }
+        nc.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main) { [weak self] n in
+            let item = n.object as? AVPlayerItem
+            Task { @MainActor in if let s = self, item === s.player.currentItem { s.trackEnded() } }   // ignore the video player's items
+        }
         nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] n in
             let raw = n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
             let opt = n.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt
@@ -53,7 +71,9 @@ enum RepeatMode: CaseIterable { case off, all, one }
                 AVAudioSession.InterruptionOptions(rawValue: opt ?? 0).contains(.shouldResume) { play() }
     }
 
+    // MARK: queue
     func start(_ tracks: [Track], at i: Int) {
+        guard tracks.indices.contains(i) else { return }
         original = tracks; queue = tracks; index = i
         if shuffle { applyShuffle() } else { load() }
     }
@@ -62,33 +82,112 @@ enum RepeatMode: CaseIterable { case off, all, one }
         if shuffle { queue = [cur] + original.filter { $0 != cur }.shuffled(); index = 0 }
         else { queue = original; index = original.firstIndex(of: cur) ?? 0 }
     }
-    @Published var isResolving = false
-    @Published var streamError: String?
-    private var loadTask: Task<Void, Never>?
+    func stop() {
+        loadTask?.cancel(); watchdog?.cancel(); statusObs = nil
+        player.pause(); player.replaceCurrentItem(with: nil)
+        queue = []; index = 0; isPlaying = false; isResolving = false; streamError = nil
+        clock.position = 0; clock.duration = 0
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+    }
+
+    // MARK: loading
     private func load() {
-        loadTask?.cancel()
+        loadTask?.cancel(); watchdog?.cancel(); statusObs = nil
         guard let t = current else { return }
-        streamError = nil; duration = t.duration; position = 0
+        streamError = nil; retries = 0; seeking = false
+        clock.duration = t.duration; clock.position = 0
+        if let yt = t.ytID, let local = DownloadManager.shared.localURL(yt) { isResolving = false; startItem(local); return }   // downloaded = instant + offline
         if let url = t.url { isResolving = false; startItem(url); return }
         guard let id = t.ytID else { return }
-        isResolving = true; player.pause(); isPlaying = false
-        // keep the app alive in background/screen-off while the next stream URL is being resolved
+        loadOnline(t, id, fresh: false)
+    }
+    private func loadOnline(_ t: Track, _ id: String, fresh: Bool) {
+        isResolving = true; isPlaying = false
+        player.pause(); player.replaceCurrentItem(with: nil)
+        updateNowPlaying()
+        // keeps the app running in background / screen-off while the next stream is being resolved
         let bg = UIApplication.shared.beginBackgroundTask(withName: "auralis.resolve", expirationHandler: nil)
         loadTask = Task { [weak self] in
             defer { UIApplication.shared.endBackgroundTask(bg) }
-            let url = try? await YouTubeSource.shared.streamURL(id)
-            guard let self, !Task.isCancelled, self.current?.id == t.id else { return }
-            self.isResolving = false
-            if let url { self.startItem(url) } else { self.streamError = "Couldn't load this track. Try another one." }
+            do {
+                let s = try await Resolver.shared.stream(id, fresh: fresh)
+                guard let self, !Task.isCancelled, self.current?.id == t.id else { return }
+                self.isResolving = false
+                self.startItem(s.url, headers: s.headers, onlineID: id, source: s.source)
+            } catch {
+                guard let self, !Task.isCancelled, self.current?.id == t.id else { return }
+                self.isResolving = false
+                self.streamError = "Couldn't load this track. Check your internet and try again."
+            }
         }
     }
-    private func startItem(_ url: URL) {
+    private func startItem(_ url: URL, headers: [String: String] = [:], onlineID: String? = nil, source: String = "") {
+        self.onlineID = onlineID; self.source = source
         try? AVAudioSession.sharedInstance().setActive(true)
-        player.replaceCurrentItem(with: AVPlayerItem(url: url))
+        let asset = AVURLAsset(url: url, options: headers.isEmpty ? nil : ["AVURLAssetHTTPHeaderFieldsKey": headers])
+        let item = AVPlayerItem(asset: asset)
+        statusObs = item.publisher(for: \.status).receive(on: DispatchQueue.main).sink { [weak self] st in
+            Task { @MainActor in
+                guard let self else { return }
+                if st == .readyToPlay { self.retries = 0; self.watchdog?.cancel() }
+                else if st == .failed { self.itemFailed() }
+            }
+        }
+        player.replaceCurrentItem(with: item)
         play()
+        watchdog?.cancel()
+        if onlineID != nil {   // if a stream never becomes ready, switch to another source automatically
+            watchdog = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(12))
+                guard !Task.isCancelled, let self, self.player.currentItem === item, item.status != .readyToPlay else { return }
+                self.itemFailed()
+            }
+        }
+        prefetchNext()
     }
+    private func itemFailed() {
+        guard let t = current else { return }
+        guard let id = onlineID, retries < 3 else {
+            isResolving = false; isPlaying = false; streamError = "Couldn't play this track. Try another one."; return
+        }
+        retries += 1; let src = source
+        player.pause(); isResolving = true
+        loadTask?.cancel()
+        loadTask = Task { [weak self] in
+            await Resolver.shared.markBad(id, source: src)
+            guard let self, !Task.isCancelled, self.current?.id == t.id else { return }
+            self.loadOnline(t, id, fresh: true)
+        }
+    }
+    private func prefetchNext() {   // next track starts instantly
+        let n = index + 1
+        guard queue.indices.contains(n), let id = queue[n].ytID, DownloadManager.shared.localURL(id) == nil else { return }
+        Task { await Resolver.shared.prefetch(id) }
+    }
+
+    // MARK: transport
     func play() { player.play(); isPlaying = true; updateNowPlaying() }
     func pause() { player.pause(); isPlaying = false; updateNowPlaying() }
+    func toggle() { isPlaying ? pause() : play() }
+    func seek(_ s: Double) {
+        let target = max(0, min(s, clock.duration > 0 ? clock.duration : s))
+        seeking = true; clock.position = target
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600)) { [weak self] _ in
+            Task { @MainActor in self?.seeking = false; self?.updateNowPlaying() }
+        }
+    }
+    func next() {
+        guard !queue.isEmpty else { return }
+        if index + 1 < queue.count { index += 1 } else if repeatMode == .all { index = 0 } else { pause(); return }
+        load()
+    }
+    func previous() {
+        if clock.position > 3 { seek(0); return }
+        index = max(0, index - 1); load()
+    }
+    func cycleRepeat() { let all = RepeatMode.allCases; repeatMode = all[(all.firstIndex(of: repeatMode)! + 1) % all.count] }
+    private func trackEnded() { if repeatMode == .one { seek(0); play() } else { next() } }
+
     func startSleep(minutes: Int) {
         sleepTask?.cancel(); sleepEnd = Date().addingTimeInterval(Double(minutes) * 60)
         sleepTask = Task { [weak self] in
@@ -97,22 +196,8 @@ enum RepeatMode: CaseIterable { case off, all, one }
         }
     }
     func cancelSleep() { sleepTask?.cancel(); sleepEnd = nil }
-    func toggle() { isPlaying ? pause() : play() }
-    func seek(_ s: Double) { player.seek(to: CMTime(seconds: s, preferredTimescale: 600)); position = s; updateNowPlaying() }
-    func next() {
-        guard !queue.isEmpty else { return }
-        if index + 1 < queue.count { index += 1 } else if repeatMode == .all { index = 0 } else { pause(); return }
-        load()
-    }
-    func previous() {
-        if position > 3 { seek(0); return }
-        index = max(0, index - 1); load()
-    }
-    func cycleRepeat() {
-        let all = RepeatMode.allCases; repeatMode = all[(all.firstIndex(of: repeatMode)! + 1) % all.count]
-    }
-    private func trackEnded() { if repeatMode == .one { seek(0); play() } else { next() } }
 
+    // MARK: lock screen / control centre
     private func setupRemote() {
         let c = MPRemoteCommandCenter.shared()
         c.playCommand.addTarget { [weak self] _ in Task { @MainActor in self?.play() }; return .success }
@@ -125,18 +210,15 @@ enum RepeatMode: CaseIterable { case off, all, one }
             return .success
         }
     }
-    private var artCache: [UInt64: UIImage] = [:]
     private func updateNowPlaying() {
         guard let t = current else { return }
-        var info: [String: Any] = [MPMediaItemPropertyTitle: t.title, MPMediaItemPropertyArtist: t.artist,
-            MPMediaItemPropertyAlbumTitle: t.album, MPMediaItemPropertyPlaybackDuration: duration > 0 ? duration : t.duration,
-            MPNowPlayingInfoPropertyElapsedPlaybackTime: position, MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0]
-        if let img = t.artwork ?? artCache[t.id] { info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: img.size) { _ in img } }
+        var info: [String: Any] = [MPMediaItemPropertyTitle: t.title, MPMediaItemPropertyArtist: t.artist, MPMediaItemPropertyAlbumTitle: t.album,
+            MPMediaItemPropertyPlaybackDuration: clock.duration > 0 ? clock.duration : t.duration,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: clock.position, MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0]
+        if let img = ArtLoader.cached(t) { info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: img.size) { _ in img } }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
-        if t.artwork == nil, artCache[t.id] == nil, let u = t.artworkURL {
-            Task { [weak self] in
-                if let (d, _) = try? await URLSession.shared.data(from: u), let img = UIImage(data: d) { self?.artCache[t.id] = img; self?.updateNowPlaying() }
-            }
+        if ArtLoader.cached(t) == nil {
+            Task { [weak self] in if await ArtLoader.image(for: t) != nil { self?.updateNowPlaying() } }
         }
     }
 }

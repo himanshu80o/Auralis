@@ -1,212 +1,6 @@
 import SwiftUI
 
-// MARK: - Theme palette (0 System, 1 Light, 2 Dark, 3 Neon Purple, 4 Neon Blue)
-struct Palette {
-    let bgTop, bgBottom, accent, accent2, text, sub, surface, tile: Color
-    let filledPlay: Bool, showMore: Bool, glow: Bool
-
-    var gradient: LinearGradient { LinearGradient(colors: [accent, accent2], startPoint: .leading, endPoint: .trailing) }
-    var background: LinearGradient { LinearGradient(colors: [bgTop, bgBottom], startPoint: .top, endPoint: .bottom) }
-
-    static let purple = Palette(bgTop: Color(red: 0.16, green: 0.03, blue: 0.30), bgBottom: Color(red: 0.02, green: 0.0, blue: 0.06),
-        accent: Color(red: 0.66, green: 0.30, blue: 1.0), accent2: Color(red: 0.42, green: 0.36, blue: 1.0),
-        text: .white, sub: Color.white.opacity(0.55), surface: Color(red: 0.55, green: 0.25, blue: 1.0).opacity(0.14),
-        tile: Color(red: 0.10, green: 0.10, blue: 0.25), filledPlay: true, showMore: true, glow: true)
-    static let blue = Palette(bgTop: Color(red: 0.0, green: 0.10, blue: 0.20), bgBottom: Color(red: 0.0, green: 0.02, blue: 0.06),
-        accent: Color(red: 0.10, green: 0.82, blue: 0.95), accent2: Color(red: 0.32, green: 0.40, blue: 1.0),
-        text: .white, sub: Color.white.opacity(0.55), surface: Color.white.opacity(0.07),
-        tile: Color(red: 0.05, green: 0.22, blue: 0.28), filledPlay: false, showMore: false, glow: true)
-    static let dark = Palette(bgTop: Color(red: 0.08, green: 0.08, blue: 0.10), bgBottom: Color(red: 0.0, green: 0.0, blue: 0.0),
-        accent: Color(red: 0.25, green: 0.85, blue: 0.90), accent2: Color(red: 0.38, green: 0.55, blue: 1.0),
-        text: .white, sub: Color.white.opacity(0.55), surface: Color.white.opacity(0.07),
-        tile: Color(red: 0.09, green: 0.19, blue: 0.24), filledPlay: false, showMore: false, glow: false)
-    static let light = Palette(bgTop: Color(red: 0.97, green: 0.98, blue: 1.0), bgBottom: Color(red: 0.90, green: 0.93, blue: 0.97),
-        accent: Color(red: 0.0, green: 0.58, blue: 0.70), accent2: Color(red: 0.25, green: 0.40, blue: 0.95),
-        text: Color(red: 0.05, green: 0.08, blue: 0.14), sub: Color.black.opacity(0.5), surface: Color.black.opacity(0.06),
-        tile: Color(red: 0.09, green: 0.19, blue: 0.24), filledPlay: false, showMore: false, glow: false)
-
-    static func make(_ theme: Int, _ scheme: ColorScheme) -> Palette {
-        switch theme {
-        case 3: return .purple
-        case 4: return .blue
-        default: return (theme == 1 || (theme == 0 && scheme == .light)) ? .light : .dark
-        }
-    }
-}
-
-// MARK: - Logo
-struct WaveShape: Shape {
-    func path(in r: CGRect) -> Path {
-        func g(_ x: Double, _ c: Double, _ w: Double) -> Double { exp(-pow((x - c) / w, 2)) }
-        var p = Path()
-        for i in 0...80 {
-            let x = Double(i) / 80
-            let y = 0.62 - 0.14 * g(x, 0.28, 0.08) + 0.10 * g(x, 0.42, 0.06) - 0.40 * g(x, 0.64, 0.10)
-            let pt = CGPoint(x: r.minX + x * r.width, y: r.minY + y * r.height)
-            i == 0 ? p.move(to: pt) : p.addLine(to: pt)
-        }
-        return p
-    }
-}
-
-struct AuralisMark: View {
-    let pal: Palette
-    var size: CGFloat = 52
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: size * 0.26).fill(pal.tile)
-            RoundedRectangle(cornerRadius: size * 0.26).stroke(.white.opacity(0.1))
-            WaveShape().stroke(pal.gradient, style: StrokeStyle(lineWidth: size * 0.07, lineCap: .round, lineJoin: .round))
-                .padding(size * 0.2).padding(.bottom, size * 0.06)
-            Capsule().fill(pal.accent.opacity(0.6)).frame(width: size * 0.5, height: size * 0.025).offset(y: size * 0.24)
-        }.frame(width: size, height: size).shadow(color: pal.glow ? pal.accent.opacity(0.35) : .clear, radius: 10)
-    }
-}
-
-// MARK: - Models
-struct Album: Identifiable, Hashable { let id: String; let name, artist: String; let art: URL? }
-
-struct SavedTrack: Codable {
-    let id: UInt64, title: String, artist: String, duration: Double
-    let url: String?, art: String?, yt: String?
-    init(_ t: Track) { id = t.id; title = t.title; artist = t.artist; duration = t.duration
-        url = t.url?.absoluteString; art = t.artworkURL?.absoluteString; yt = t.ytID }
-    var track: Track { Track(id: id, title: title, artist: artist, album: "Auralis", duration: duration,
-                             url: url.flatMap(URL.init(string:)), item: nil, artworkURL: art.flatMap(URL.init(string:)), ytID: yt) }
-}
-
-@MainActor final class RecentStore: ObservableObject {
-    @Published private(set) var items: [Track] = []
-    private let key = "auralis.recents"
-    init() {
-        if let d = UserDefaults.standard.data(forKey: key), let s = try? JSONDecoder().decode([SavedTrack].self, from: d) { items = s.map(\.track) }
-    }
-    func add(_ t: Track) {
-        guard t.ytID != nil || t.artworkURL != nil else { return }   // online tracks only
-        items.removeAll { $0.id == t.id }; items.insert(t, at: 0); items = Array(items.prefix(20))
-        if let d = try? JSONEncoder().encode(items.map(SavedTrack.init)) { UserDefaults.standard.set(d, forKey: key) }
-    }
-}
-
-func fnv(_ s: String) -> UInt64 {
-    var h: UInt64 = 14695981039346656037
-    for b in s.utf8 { h = (h ^ UInt64(b)) &* 1099511628211 }
-    return h
-}
-
-// MARK: - Audius (fallback only)
-enum Audius {
-    struct R: Decodable {
-        struct T: Decodable {
-            struct U: Decodable { let name: String }
-            struct A: Decodable { let big: String?; enum CodingKeys: String, CodingKey { case big = "480x480" } }
-            let id: String, title: String, duration: Double?, user: U, artwork: A?
-        }
-        let data: [T]
-    }
-    static func tracks(_ query: String) async throws -> [Track] {
-        var c = URLComponents(string: "https://api.audius.co/v1/tracks/search")!
-        c.queryItems = [URLQueryItem(name: "app_name", value: "Auralis"), URLQueryItem(name: "query", value: query)]
-        let (data, _) = try await URLSession.shared.data(from: c.url!)
-        return try JSONDecoder().decode(R.self, from: data).data.map { t in
-            Track(id: fnv(t.id), title: t.title, artist: t.user.name, album: "Auralis", duration: t.duration ?? 0,
-                  url: URL(string: "https://api.audius.co/v1/tracks/\(t.id)/stream?app_name=Auralis"), item: nil,
-                  artworkURL: t.artwork?.big.flatMap(URL.init(string:)))
-        }
-    }
-}
-
-// MARK: - Online data source (Piped API: JSON only, no web page, no ads)
-actor YouTubeSource {
-    static let shared = YouTubeSource()
-    private var instances = ["https://pipedapi.kavin.rocks", "https://pipedapi.adminforge.de",
-                             "https://api.piped.private.coffee", "https://pipedapi.leptons.xyz"]
-    private var discovered = false
-
-    struct Item: Decodable {
-        let url: String?, title: String?, name: String?, thumbnail: String?, uploaderName: String?
-        let duration: Double?, type: String?
-    }
-    struct Search: Decodable { let items: [Item] }
-    struct Playlist: Decodable { let relatedStreams: [Item] }
-    struct Streams: Decodable {
-        struct A: Decodable { let url: String; let mimeType: String?; let bitrate: Int? }
-        let audioStreams: [A]
-    }
-    struct Inst: Decodable { let api_url: String; let uptime_24h: Double? }
-
-    private func discover() async {
-        discovered = true
-        guard let u = URL(string: "https://piped-instances.kavin.rocks/"),
-              let (d, _) = try? await URLSession.shared.data(from: u),
-              let list = try? JSONDecoder().decode([Inst].self, from: d) else { return }
-        let top = list.sorted { ($0.uptime_24h ?? 0) > ($1.uptime_24h ?? 0) }.prefix(6).map { $0.api_url }
-        instances = Array(NSOrderedSet(array: top + instances)) as? [String] ?? instances
-    }
-
-    private func get<T: Decodable>(_ path: String, _ q: [URLQueryItem] = []) async throws -> T {
-        if !discovered { await discover() }
-        var last: Error = URLError(.cannotConnectToHost)
-        for (i, base) in instances.enumerated() {
-            guard var c = URLComponents(string: base + path) else { continue }
-            if !q.isEmpty { c.queryItems = q }
-            guard let url = c.url else { continue }
-            do {
-                let (d, r) = try await URLSession.shared.data(for: URLRequest(url: url, timeoutInterval: 8))
-                guard (r as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
-                let v = try JSONDecoder().decode(T.self, from: d)
-                if i > 0 { let b = instances.remove(at: i); instances.insert(b, at: 0) }
-                return v
-            } catch { last = error }
-        }
-        throw last
-    }
-
-    private func queryValue(_ url: String?, _ name: String) -> String? {
-        url.flatMap { URLComponents(string: $0)?.queryItems?.first(where: { $0.name == name })?.value }
-    }
-    private func track(_ i: Item) -> Track? {
-        guard let id = queryValue(i.url, "v"), let dur = i.duration, dur > 0 else { return nil }
-        let artist = (i.uploaderName ?? "Unknown").replacingOccurrences(of: " - Topic", with: "")
-        return Track(id: fnv(id), title: i.title ?? "Unknown", artist: artist, album: "Auralis", duration: dur,
-                     url: nil, item: nil, artworkURL: i.thumbnail.flatMap(URL.init(string:)), ytID: id)
-    }
-
-    func search(_ query: String) async throws -> [Track] {
-        let r: Search = try await get("/search", [URLQueryItem(name: "q", value: query), URLQueryItem(name: "filter", value: "music_songs")])
-        let t = r.items.filter { $0.type == "stream" }.compactMap(track)
-        if t.isEmpty { throw URLError(.cannotParseResponse) }
-        return t
-    }
-
-    func albums(_ query: String) async throws -> [Album] {
-        let r: Search = try await get("/search", [URLQueryItem(name: "q", value: query), URLQueryItem(name: "filter", value: "music_albums")])
-        return r.items.compactMap { i in
-            guard let id = queryValue(i.url, "list") else { return nil }
-            return Album(id: id, name: i.name ?? i.title ?? "Album",
-                         artist: (i.uploaderName ?? "").replacingOccurrences(of: " - Topic", with: ""),
-                         art: i.thumbnail.flatMap(URL.init(string:)))
-        }
-    }
-
-    func albumTracks(_ id: String) async throws -> [Track] {
-        let p: Playlist = try await get("/playlists/\(id)")
-        return p.relatedStreams.compactMap(track)
-    }
-
-    /// AVPlayer can't play WebM/Opus, so pick the best AAC (audio/mp4) stream.
-    func streamURL(_ id: String) async throws -> URL {
-        let s: Streams = try await get("/streams/\(id)")
-        let best = s.audioStreams.filter { ($0.mimeType ?? "").hasPrefix("audio/mp4") }.max { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) }
-        guard let u = best.flatMap({ URL(string: $0.url) }) else { throw URLError(.resourceUnavailable) }
-        return u
-    }
-}
-
-@MainActor func playAlbum(_ a: Album, player: PlaybackManager) async {
-    if let t = try? await YouTubeSource.shared.albumTracks(a.id), !t.isEmpty { player.start(t, at: 0) }
-    else { player.streamError = "Couldn't open this album. Try another one." }
-}
+enum OnlineDest: Hashable { case recents, trending, albums }
 
 // MARK: - Reusable pieces
 struct SectionHeader: View {
@@ -226,23 +20,40 @@ struct SectionHeader: View {
     }
 }
 
+struct DownloadButton: View {
+    @EnvironmentObject var dl: DownloadManager
+    let t: Track; let yt: String; let pal: Palette
+    var body: some View {
+        if dl.isDownloaded(yt) {
+            Image(systemName: "checkmark.circle.fill").font(.system(size: 22)).foregroundStyle(pal.accent).frame(width: 34, height: 44)
+        } else if let p = dl.progress[yt] {
+            ZStack {
+                Circle().stroke(pal.sub.opacity(0.3), lineWidth: 2.5)
+                Circle().trim(from: 0, to: max(p, 0.05)).stroke(pal.accent, style: StrokeStyle(lineWidth: 2.5, lineCap: .round)).rotationEffect(.degrees(-90))
+            }.frame(width: 22, height: 22).frame(width: 34, height: 44)
+        } else {
+            Button { dl.download(t) } label: {
+                Image(systemName: "arrow.down.circle").font(.system(size: 22)).foregroundStyle(pal.sub).frame(width: 34, height: 44)
+            }.buttonStyle(.plain)
+        }
+    }
+}
+
 struct TrackRow: View {
     @EnvironmentObject var player: PlaybackManager
+    @EnvironmentObject var favs: FavoritesStore
+    @EnvironmentObject var dl: DownloadManager
     let t: Track; let pal: Palette; let action: () -> Void
     var body: some View {
         let now = player.current?.id == t.id
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
             ArtView(track: t).frame(width: 62, height: 62).clipShape(RoundedRectangle(cornerRadius: 12))
             VStack(alignment: .leading, spacing: 4) {
                 Text(t.title).font(.system(size: 17, weight: .medium)).lineLimit(1).foregroundStyle(now ? pal.accent : pal.text)
                 Text(t.artist).font(.system(size: 14)).lineLimit(1).foregroundStyle(pal.sub)
             }
             Spacer(minLength: 4)
-            if pal.showMore {
-                Menu { Button("Play now", action: action) } label: {
-                    Image(systemName: "ellipsis").rotationEffect(.degrees(90)).foregroundStyle(pal.sub).frame(width: 28, height: 40)
-                }
-            }
+            if let yt = t.ytID { DownloadButton(t: t, yt: yt, pal: pal) }
             Button(action: action) {
                 Image(systemName: now && player.isPlaying ? "waveform" : "play.fill").font(.system(size: 15))
                     .foregroundStyle(pal.filledPlay ? Color.white : pal.text)
@@ -251,6 +62,13 @@ struct TrackRow: View {
             }.buttonStyle(.plain)
         }
         .padding(.horizontal, 20).padding(.vertical, 8).contentShape(Rectangle()).onTapGesture(perform: action)
+        .contextMenu {
+            Button("Play", systemImage: "play.fill", action: action)
+            if t.ytID != nil {
+                Button(favs.contains(t) ? "Remove from Favourites" : "Add to Favourites", systemImage: favs.contains(t) ? "heart.slash" : "heart") { favs.toggle(t) }
+                if !dl.isDownloaded(t.ytID!) { Button("Download", systemImage: "arrow.down.circle") { dl.download(t) } }
+            }
+        }
     }
 }
 
@@ -258,32 +76,41 @@ struct AlbumTile: View {
     let a: Album; let pal: Palette; var size: CGFloat = 132
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ZStack {
-                pal.surface
-                if let u = a.art { AsyncImage(url: u) { $0.resizable().scaledToFill() } placeholder: { Color.clear } }
-            }.frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: 16))
+            ArtView(track: Track(id: fnv(a.id), title: a.name, artist: a.artist, album: "", duration: 0, url: nil, item: nil, artworkURL: a.art))
+                .frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: 16))
             Text(a.name).font(.system(size: 14, weight: .medium)).lineLimit(1).foregroundStyle(pal.text)
             Text(a.artist).font(.system(size: 12)).lineLimit(1).foregroundStyle(pal.sub)
         }.frame(width: size, alignment: .leading)
     }
 }
 
-enum OnlineDest: Hashable { case recents, trending, albums }
+@MainActor func playAlbum(_ a: Album, player: PlaybackManager) async {
+    let t = await Catalog.albumTracks(a.id)
+    if t.isEmpty { player.streamError = "Couldn't open this album. Try another one." } else { player.start(t, at: 0) }
+}
 
+// MARK: - Secondary screens
 struct TrackListScreen: View {
     @EnvironmentObject var player: PlaybackManager
+    @EnvironmentObject var dl: DownloadManager
     @AppStorage("theme") private var theme = 0
     @Environment(\.colorScheme) private var scheme
     let title: String; let tracks: [Track]
     var body: some View {
         let pal = Palette.make(theme, scheme)
-        ZStack {
-            pal.background.ignoresSafeArea()
-            ScrollView { LazyVStack(spacing: 0) {
-                ForEach(Array(tracks.enumerated()), id: \.element.id) { i, t in TrackRow(t: t, pal: pal) { player.start(tracks, at: i) } }
-                Color.clear.frame(height: 90)
-            } }
-        }.navigationTitle(title).navigationBarTitleDisplayMode(.inline)
+        Screen(pal: pal) {
+            if tracks.isEmpty {
+                Text("Nothing here yet").foregroundStyle(pal.sub)
+            } else {
+                ScrollView { LazyVStack(spacing: 0) {
+                    ForEach(Array(tracks.enumerated()), id: \.element.id) { i, t in TrackRow(t: t, pal: pal) { player.start(tracks, at: i) } }
+                } }
+            }
+        }
+        .navigationTitle(title).navigationBarTitleDisplayMode(.inline)
+        .toolbar { if tracks.contains(where: { $0.ytID != nil }) { ToolbarItem(placement: .topBarTrailing) {
+            Button { dl.downloadAll(tracks) } label: { Image(systemName: "arrow.down.circle") } } } }
+        .miniPlayerInset()
     }
 }
 
@@ -294,24 +121,139 @@ struct AlbumGridScreen: View {
     let albums: [Album]
     var body: some View {
         let pal = Palette.make(theme, scheme)
-        ZStack {
-            pal.background.ignoresSafeArea()
+        Screen(pal: pal) {
             ScrollView {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 16)], spacing: 18) {
                     ForEach(albums) { a in
                         Button { Task { await playAlbum(a, player: player) } } label: { AlbumTile(a: a, pal: pal) }.buttonStyle(.plain)
                     }
                 }.padding(20)
-                Color.clear.frame(height: 90)
             }
-        }.navigationTitle("Popular Albums").navigationBarTitleDisplayMode(.inline)
+        }.navigationTitle("Popular Albums").navigationBarTitleDisplayMode(.inline).miniPlayerInset()
     }
 }
 
-// MARK: - Online tab (Home-style layout)
+struct DownloadsScreen: View {
+    @EnvironmentObject var player: PlaybackManager
+    @EnvironmentObject var dl: DownloadManager
+    @AppStorage("theme") private var theme = 0
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        let pal = Palette.make(theme, scheme)
+        let tracks = dl.tracks
+        Screen(pal: pal) {
+            if tracks.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "arrow.down.circle").font(.system(size: 44)).foregroundStyle(pal.accent)
+                    Text("No downloads yet").font(.headline).foregroundStyle(pal.text)
+                    Text("Tap the download icon next to any song.").font(.footnote).foregroundStyle(pal.sub)
+                }
+            } else {
+                List {
+                    ForEach(Array(tracks.enumerated()), id: \.element.id) { i, t in
+                        Button { player.start(tracks, at: i) } label: {
+                            HStack(spacing: 14) {
+                                ArtView(track: t).frame(width: 56, height: 56).clipShape(RoundedRectangle(cornerRadius: 12))
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(t.title).font(.system(size: 16, weight: .medium)).lineLimit(1).foregroundStyle(player.current?.id == t.id ? pal.accent : pal.text)
+                                    Text(t.artist).font(.system(size: 13)).lineLimit(1).foregroundStyle(pal.sub)
+                                }
+                            }
+                        }.listRowBackground(Color.clear)
+                        .swipeActions { Button("Delete", role: .destructive) { if let it = dl.items.first(where: { $0.yt == t.ytID }) { dl.delete(it) } } }
+                    }
+                }.listStyle(.plain).scrollContentBackground(.hidden)
+            }
+        }.navigationTitle("My Downloads").navigationBarTitleDisplayMode(.inline).miniPlayerInset()
+    }
+}
+
+// MARK: - Region picker / setup / profile
+struct RegionList: View {
+    @Binding var selection: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var q = ""
+    var body: some View {
+        List(Regions.all.filter { q.isEmpty || $0.name.localizedCaseInsensitiveContains(q) }, id: \.code) { r in
+            Button { selection = r.code; dismiss() } label: {
+                HStack { Text(Regions.flag(r.code)); Text(r.name); Spacer(); if r.code == selection { Image(systemName: "checkmark") } }
+            }
+        }.searchable(text: $q).navigationTitle("Region").navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+struct SetupView: View {
+    @AppStorage("username") private var username = ""
+    @AppStorage("region") private var region = Regions.defaultCode
+    @AppStorage("setupDone") private var done = false
+    var body: some View {
+        let pal = Palette.dark
+        NavigationStack {
+            Screen(pal: pal) {
+                VStack(spacing: 18) {
+                    Spacer()
+                    AuralisMark(pal: pal, size: 84)
+                    Text("Set up your profile").font(.title2.bold())
+                    Text("Your region is used to recommend trending music.").font(.footnote).foregroundStyle(pal.sub)
+                    TextField("", text: $username, prompt: Text("Username").foregroundColor(pal.sub))
+                        .padding(14).background(pal.surface, in: RoundedRectangle(cornerRadius: 14)).padding(.horizontal, 24)
+                    NavigationLink { RegionList(selection: $region) } label: {
+                        HStack { Text("Region"); Spacer(); Text("\(Regions.flag(region)) \(Regions.name(region))"); Image(systemName: "chevron.right").font(.caption) }
+                            .padding(14).background(pal.surface, in: RoundedRectangle(cornerRadius: 14)).padding(.horizontal, 24)
+                    }
+                    Button { done = true } label: {
+                        Text("Continue").font(.system(size: 17, weight: .semibold)).frame(maxWidth: .infinity).padding(.vertical, 14)
+                            .background(pal.gradient, in: Capsule()).foregroundStyle(.black).padding(.horizontal, 24)
+                    }.disabled(username.trimmingCharacters(in: .whitespaces).isEmpty).opacity(username.trimmingCharacters(in: .whitespaces).isEmpty ? 0.5 : 1)
+                    Spacer()
+                }
+            }.toolbar(.hidden, for: .navigationBar)
+        }.foregroundStyle(.white).environment(\.colorScheme, .dark).preferredColorScheme(.dark)
+    }
+}
+
+struct ProfileSheet: View {
+    @EnvironmentObject var dl: DownloadManager
+    @EnvironmentObject var favs: FavoritesStore
+    @AppStorage("username") private var username = ""
+    @AppStorage("region") private var region = Regions.defaultCode
+    @AppStorage("theme") private var theme = 0
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        let pal = Palette.make(theme, scheme)
+        NavigationStack {
+            Screen(pal: pal) {
+                Form {
+                    Section {
+                        HStack(spacing: 14) {
+                            ZStack { pal.gradient; Text(String(username.trimmingCharacters(in: .whitespaces).prefix(1)).uppercased()).font(.title2.bold()).foregroundStyle(.white) }
+                                .frame(width: 56, height: 56).clipShape(Circle())
+                            TextField("", text: $username, prompt: Text("Username").foregroundColor(pal.sub)).font(.title3)
+                        }
+                        NavigationLink { RegionList(selection: $region) } label: {
+                            HStack { Text("Region"); Spacer(); Text("\(Regions.flag(region)) \(Regions.name(region))").foregroundStyle(pal.sub) }
+                        }
+                    }.listRowBackground(pal.surface)
+                    Section {
+                        NavigationLink { DownloadsScreen() } label: { Label("My Downloads (\(dl.items.count))", systemImage: "arrow.down.circle.fill") }
+                        NavigationLink { TrackListScreen(title: "Favourites", tracks: favs.items) } label: { Label("Favourites (\(favs.items.count))", systemImage: "heart.fill") }
+                    }.listRowBackground(pal.surface)
+                }.scrollContentBackground(.hidden).foregroundStyle(pal.text)
+            }
+            .navigationTitle("Profile").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+        }.tint(pal.accent)
+    }
+}
+
+// MARK: - Online tab
 struct OnlineView: View {
     @EnvironmentObject var player: PlaybackManager
+    @EnvironmentObject var dl: DownloadManager
     @AppStorage("theme") private var theme = 0
+    @AppStorage("region") private var region = Regions.defaultCode
+    @AppStorage("username") private var username = ""
     @Environment(\.colorScheme) private var scheme
     @StateObject private var recents = RecentStore()
     @State private var query = ""
@@ -322,32 +264,28 @@ struct OnlineView: View {
     @State private var loading = false
     @State private var notice: String?
     @State private var page = 0
-    @FocusState private var focused: Bool
+    @State private var showProfile = false
 
     static let playlists: [(String, String, String)] = [
         ("Chill Vibes", "lofi chill songs", "moon.stars.fill"), ("Future Hits", "new hit songs 2026", "sparkles"),
-        ("Workout", "workout gym songs", "figure.run"), ("Bollywood", "latest bollywood songs", "music.mic")]
+        ("Workout", "workout gym songs", "figure.run"), ("Party", "party dance songs", "music.mic")]
 
     var pal: Palette { Palette.make(theme, scheme) }
 
     var body: some View {
         NavigationStack {
-            ZStack {
-                pal.background.ignoresSafeArea()
-                if pal.glow {
-                    Circle().fill(pal.accent.opacity(0.22)).frame(width: 420).blur(radius: 90).offset(x: 140, y: -330).allowsHitTesting(false)
-                }
+            Screen(pal: pal) {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 24) {
-                        header
-                        searchBar
-                        if let msg = player.streamError ?? notice {
+                    LazyVStack(alignment: .leading, spacing: 24) {
+                        TopBar(pal: pal) { trailingButtons }
+                        SearchField(pal: pal, prompt: "Search songs, artists, albums…", text: $query) { submitSearch() }
+                            .onChange(of: query) { _, v in if v.isEmpty { searchQ = nil } }
+                        if let msg = player.streamError ?? dl.lastError ?? notice {
                             Text(msg).font(.footnote).foregroundStyle(pal.sub).padding(.horizontal, 20)
                         }
                         if let q = searchQ { searchResults(q) } else { home }
-                        Color.clear.frame(height: 90)
-                    }
-                }.scrollDismissesKeyboard(.interactively).refreshable { await loadHome() }
+                    }.padding(.bottom, 12)
+                }.scrollDismissesKeyboard(.interactively).refreshable { await loadHome(force: true) }
             }
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: OnlineDest.self) { d in
@@ -358,50 +296,26 @@ struct OnlineView: View {
                 }
             }
         }
-        .task { await loadHome() }
+        .miniPlayerInset()
+        .sheet(isPresented: $showProfile) { ProfileSheet() }
+        .task(id: region) { await loadHome(force: false) }
         .onChange(of: player.current?.id) { _, _ in if let t = player.current { recents.add(t) } }
     }
 
-    // MARK: header + search
-    var header: some View {
+    var trailingButtons: some View {
         HStack(spacing: 14) {
-            AuralisMark(pal: pal, size: 56)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("AURALIS").font(.system(size: 26, weight: .bold)).tracking(2).foregroundStyle(pal.text)
-                Text("EVERY SOUND. EVERY MOMENT.").font(.system(size: 9.5, weight: .semibold)).tracking(1.6).foregroundStyle(pal.accent)
-            }
-            Spacer()
             ZStack(alignment: .topTrailing) {
                 Image(systemName: "bell").font(.system(size: 22)).foregroundStyle(pal.text)
                 Circle().fill(.red).frame(width: 9, height: 9).offset(x: 3, y: -2)
             }
-            avatar
-        }.padding(.horizontal, 20).padding(.top, 8)
-    }
-
-    var avatar: some View {
-        Group {
-            if let img = UIImage(named: "Avatar") { Image(uiImage: img).resizable().scaledToFill() }
-            else { ZStack { pal.gradient; Image(systemName: "person.fill").foregroundStyle(.white) } }
-        }.frame(width: 44, height: 44).clipShape(Circle()).overlay(Circle().stroke(.white.opacity(0.35), lineWidth: 1))
-    }
-
-    var searchBar: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "magnifyingglass").font(.system(size: 18)).foregroundStyle(pal.text)
-            TextField("", text: $query, prompt: Text("Search songs, artists, albums…").foregroundColor(pal.sub))
-                .focused($focused).submitLabel(.search).foregroundStyle(pal.text)
-                .onSubmit { submitSearch() }
-            if !query.isEmpty || searchQ != nil {
-                Button { query = ""; searchQ = nil; notice = nil } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(pal.sub) }
+            Button { showProfile = true } label: {
+                ZStack {
+                    pal.gradient
+                    let ch = String(username.trimmingCharacters(in: .whitespaces).prefix(1)).uppercased()
+                    if ch.isEmpty { Image(systemName: "person.fill").foregroundStyle(.white) } else { Text(ch).font(.headline).foregroundStyle(.white) }
+                }.frame(width: 44, height: 44).clipShape(Circle()).overlay(Circle().stroke(.white.opacity(0.35), lineWidth: 1))
             }
-            Rectangle().fill(pal.sub.opacity(0.4)).frame(width: 1, height: 26)
-            Button { focused = true } label: { Image(systemName: "waveform").font(.system(size: 18, weight: .semibold)).foregroundStyle(pal.accent) }
         }
-        .padding(.horizontal, 16).frame(height: 52)
-        .background(pal.surface, in: Capsule())
-        .overlay(Capsule().stroke(pal.glow ? pal.accent.opacity(0.45) : pal.sub.opacity(0.25), lineWidth: 1))
-        .padding(.horizontal, 20)
     }
 
     // MARK: home sections
@@ -414,14 +328,14 @@ struct OnlineView: View {
             VStack(spacing: 0) {
                 ForEach(Array(trending.prefix(5).enumerated()), id: \.element.id) { i, t in
                     TrackRow(t: t, pal: pal) { player.start(trending, at: i) }
-                    if i < min(trending.count, 5) - 1 { Rectangle().fill(pal.sub.opacity(0.18)).frame(height: 0.5).padding(.leading, 96).padding(.trailing, 20) }
+                    if i < min(trending.count, 5) - 1 { Rectangle().fill(pal.sub.opacity(0.18)).frame(height: 0.5).padding(.leading, 94).padding(.trailing, 20) }
                 }
             }
         }
         if !albums.isEmpty {
             SectionHeader(title: "Popular Albums", pal: pal, dest: .albums)
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 14) {
+                LazyHStack(spacing: 14) {
                     ForEach(albums.prefix(10)) { a in
                         Button { Task { await playAlbum(a, player: player) } } label: { AlbumTile(a: a, pal: pal) }.buttonStyle(.plain)
                     }
@@ -453,7 +367,7 @@ struct OnlineView: View {
     func heroSlide(_ t: Track?, _ i: Int) -> some View {
         ZStack(alignment: .leading) {
             LinearGradient(colors: [Color.black.opacity(0.85), pal.accent2.opacity(0.55), pal.accent.opacity(0.35)], startPoint: .leading, endPoint: .trailing)
-            HStack { Spacer(); ArtView(track: t).frame(width: 210, height: 210).clipped()
+            HStack { Spacer(); ArtView(track: t).frame(width: 220, height: 210)
                 .mask(LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: UnitPoint(x: 0.6, y: 0.5))) }
             LinearGradient(colors: [Color.black.opacity(0.55), .clear], startPoint: .leading, endPoint: .trailing)
             VStack(alignment: .leading, spacing: 2) {
@@ -472,10 +386,10 @@ struct OnlineView: View {
     @ViewBuilder var recentSection: some View {
         SectionHeader(title: "Recently Played", pal: pal, dest: recents.items.isEmpty ? nil : .recents)
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 14) {
+            LazyHStack(spacing: 14) {
                 if recents.items.isEmpty {
                     ForEach(Self.playlists, id: \.0) { p in
-                        Button { searchQ = p.0; query = p.0; Task { await runSearch(p.1) } } label: {
+                        Button { query = p.0; searchQ = p.0; Task { await runSearch(p.1) } } label: {
                             VStack(alignment: .leading, spacing: 6) {
                                 ZStack {
                                     LinearGradient(colors: [pal.accent2.opacity(0.9), pal.accent.opacity(0.6)], startPoint: .topLeading, endPoint: .bottomTrailing)
@@ -501,7 +415,6 @@ struct OnlineView: View {
         }
     }
 
-    // MARK: search results
     @ViewBuilder func searchResults(_ q: String) -> some View {
         SectionHeader(title: "Results", pal: pal, dest: nil)
         if loading && results.isEmpty { ProgressView().tint(pal.accent).frame(maxWidth: .infinity).padding(.top, 40) }
@@ -514,27 +427,32 @@ struct OnlineView: View {
     func submitSearch() {
         let q = query.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return }
-        focused = false; searchQ = q
+        searchQ = q
         Task { await runSearch(q) }
     }
 
     func runSearch(_ q: String) async {
         loading = true; notice = nil; results = []; defer { loading = false }
-        do { results = try await YouTubeSource.shared.search(q) }
-        catch {
-            if let a = try? await Audius.tracks(q), !a.isEmpty { results = a; notice = "Main source is unreachable right now — showing alternate results." }
-            else { notice = "Could not load. Check your internet." }
-        }
+        if let r = try? await Catalog.search(q) { results = r; return }
+        let a = await Catalog.audius(q)
+        if a.isEmpty { notice = "Could not load. Check your internet." } else { results = a; notice = "Main source is unreachable right now — showing alternate results." }
     }
 
-    func loadHome() async {
-        loading = true; notice = nil; defer { loading = false }
-        async let al = try? YouTubeSource.shared.albums("popular albums")
-        do { trending = try await YouTubeSource.shared.search("top songs this week") }
-        catch {
-            if let a = try? await Audius.tracks("trending"), !a.isEmpty { trending = a; notice = "Main source is unreachable right now — showing alternate results." }
-            else { notice = "Could not load. Pull down to retry." }
+    func loadHome(force: Bool) async {
+        let key = "auralis.trending." + region
+        if trending.isEmpty, let d = UserDefaults.standard.data(forKey: key), let s = try? JSONDecoder().decode([SavedTrack].self, from: d) {
+            trending = s.map(\.track)   // show last results instantly, refresh below
         }
-        if let a = await al, !a.isEmpty { albums = a }
+        loading = trending.isEmpty; notice = nil; defer { loading = false }
+        async let al = Catalog.albums(Regions.albumQuery(region))
+        if let t = try? await Catalog.search(Regions.trendingQuery(region)) {
+            trending = t
+            if let d = try? JSONEncoder().encode(t.map(SavedTrack.init)) { UserDefaults.standard.set(d, forKey: key) }
+        } else if trending.isEmpty {
+            let a = await Catalog.audius("trending")
+            if a.isEmpty { notice = "Could not load. Pull down to retry." } else { trending = a; notice = "Main source is unreachable right now — showing alternate results." }
+        }
+        let a = await al
+        if !a.isEmpty { albums = a }
     }
 }

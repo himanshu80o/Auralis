@@ -11,6 +11,8 @@ targets:
       properties:
         CFBundleDisplayName: AURALIS
         UIBackgroundModes: [audio]
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         NSAppleMusicUsageDescription: "Auralis scans your music library to list and play your songs."
         NSPhotoLibraryUsageDescription: "Auralis finds videos in your Photos library so you can watch them. Nothing is uploaded."
         UILaunchScreen: {}

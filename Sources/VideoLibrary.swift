@@ -34,7 +34,8 @@ struct Thumb: View {
 struct VideoPlayerScreen: View {
     let asset: PHAsset; @State private var player: AVPlayer?
     var body: some View {
-        Group { if let player { VideoPlayer(player: player).onAppear { player.play() } } else { ProgressView("Loading (may download from iCloud)…") } }
+        Group { if let player { VideoPlayer(player: player).onAppear { player.play() } } else { ProgressView("Loading (may download from iCloud)…").tint(.white).foregroundStyle(.white) } }
+            .onDisappear { player?.pause(); player = nil }
             .task {
                 let o = PHVideoRequestOptions(); o.isNetworkAccessAllowed = true
                 PHImageManager.default().requestPlayerItem(forVideo: asset, options: o) { item, _ in

@@ -10,7 +10,7 @@ struct Track: Identifiable, Hashable {
     var artworkData: Data? = nil
     var artworkURL: URL? = nil
     var ytID: String? = nil   // YouTube video id; stream URL is resolved lazily at play time
-    var artwork: UIImage? { item?.artwork?.image(at: CGSize(width: 600, height: 600)) ?? artworkData.flatMap(UIImage.init(data:)) }
+    static func ytThumb(_ id: String) -> URL { URL(string: "https://i.ytimg.com/vi/\(id)/mqdefault.jpg")! }
     static func == (a: Track, b: Track) -> Bool { a.id == b.id }
     func hash(into h: inout Hasher) { h.combine(id) }
 }
